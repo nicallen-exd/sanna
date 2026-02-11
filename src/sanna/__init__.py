@@ -1,11 +1,11 @@
 """
-Sanna — Reasoning integrity infrastructure for AI agents.
+Sanna — Coherence checks for AI agents.
 
 Generates portable, offline-verifiable "reasoning receipts" that document
-AI agent decisions with C1-C5 coherence checks and tamper-evident hashing.
+AI agent decisions with C1-C5 coherence checks and consistency-verified hashing.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .hashing import hash_text, hash_obj, canonicalize_text
 from .receipt import (

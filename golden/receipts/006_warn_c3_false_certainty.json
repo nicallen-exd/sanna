@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.3.0",
+  "tool_version": "0.3.1",
   "checks_version": "1",
   "receipt_id": "5d9c7be48d94067b",
-  "receipt_fingerprint": "ab0c6eb4f65211a5",
+  "receipt_fingerprint": "f528bb2b082be7d4",
   "trace_id": "golden-006-warn-c3-certainty",
-  "timestamp": "2026-02-11T03:34:53.754751+00:00",
+  "timestamp": "2026-02-11T20:57:20.222262+00:00",
   "inputs": {
     "query": "API free tier",
     "context": "Free tier available if usage is under 1000 requests/month. Requires API key registration. Rate limits apply. Exceeding limits requires paid plan upgrade."

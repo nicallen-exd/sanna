@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.3.0",
+  "tool_version": "0.3.1",
   "checks_version": "1",
   "receipt_id": "095ac44b3bea07b4",
-  "receipt_fingerprint": "3518219c3034372b",
+  "receipt_fingerprint": "98854b27d0626eb8",
   "trace_id": "golden-002-pass-simple-qa",
-  "timestamp": "2026-02-11T03:34:53.750645+00:00",
+  "timestamp": "2026-02-11T20:57:20.219670+00:00",
   "inputs": {
     "query": "capital of France",
     "context": "France is a country in Western Europe. Its capital city is Paris, which has served as the capital since the reign of the Capetian dynasty."

@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.3.0",
+  "tool_version": "0.3.1",
   "checks_version": "1",
   "receipt_id": "706e20339974ab45",
-  "receipt_fingerprint": "2dbb60b638e41736",
+  "receipt_fingerprint": "8f4b460dddbbe820",
   "trace_id": "golden-011-pass-span-provenance",
-  "timestamp": "2026-02-11T03:34:53.758936+00:00",
+  "timestamp": "2026-02-11T20:57:20.224107+00:00",
   "inputs": {
     "query": "document summary",
     "context": "The document discusses quarterly revenue growth of 15%, new product launches in Q3, and expansion into European markets."

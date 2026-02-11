@@ -263,7 +263,9 @@ def _generate_receipt_with_checks(
     context_hash = hash_obj(inputs)
     output_hash = hash_obj(outputs)
 
-    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}"
+    checks_data = [{"check_id": c.check_id, "passed": c.passed, "severity": c.severity, "evidence": c.evidence} for c in check_results]
+    checks_hash = hash_obj(checks_data)
+    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}"
     receipt_fingerprint = hash_text(fingerprint_input)
 
     receipt_dict = {

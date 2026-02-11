@@ -15,7 +15,7 @@ from .hashing import hash_text, hash_obj
 # VERSION CONSTANTS
 # =============================================================================
 
-TOOL_VERSION = "0.3.0"
+TOOL_VERSION = "0.3.1"
 SCHEMA_VERSION = "0.1"
 CHECKS_VERSION = "1"  # Increment when check logic changes
 
@@ -468,7 +468,10 @@ def generate_receipt(trace_data: dict) -> SannaReceipt:
     output_hash = hash_obj(outputs)
 
     # Stable fingerprint for diffs/golden tests (doesn't change across runs of same trace)
-    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}"
+    # Include checks in fingerprint so tampering with check results invalidates it
+    checks_data = [{"check_id": c.check_id, "passed": c.passed, "severity": c.severity, "evidence": c.evidence} for c in checks]
+    checks_hash = hash_obj(checks_data)
+    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}"
     receipt_fingerprint = hash_text(fingerprint_input)
 
     return SannaReceipt(

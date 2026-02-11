@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.3.0",
+  "tool_version": "0.3.1",
   "checks_version": "1",
   "receipt_id": "1ac62cc0ee854b8b",
-  "receipt_fingerprint": "cfdf7e4ae8a4767a",
+  "receipt_fingerprint": "4bbe830899dd308c",
   "trace_id": "golden-009-warn-c4-conflict",
-  "timestamp": "2026-02-11T03:34:53.757370+00:00",
+  "timestamp": "2026-02-11T20:57:20.223337+00:00",
   "inputs": {
     "query": "license transfer policy",
     "context": "License transfers are permitted for enterprise accounts. Individual licenses cannot be transferred. Enterprise transfer requires manager approval. All transfers are non-refundable."

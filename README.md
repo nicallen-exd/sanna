@@ -1,6 +1,6 @@
-# Sanna — Reasoning Integrity for AI Agents
+# Sanna — Coherence Checks for AI Agents
 
-Checks AI agent reasoning during execution. Halts when constraints are violated. Generates portable receipts proving governance was enforced.
+Checks AI agent reasoning during execution. Halts when constraints are violated. Generates portable receipts documenting what checks ran and whether they passed.
 
 ## The Problem
 
@@ -124,7 +124,7 @@ context_hash: 8f215f8ed9b85078
 output_hash:  42b19b29a5ef758b
 ```
 
-Receipts include tamper-evident hashes (canonical SHA256). If anyone modifies the inputs, outputs, or check results, verification fails. Receipts can be verified by third parties without platform access.
+Receipts include consistency-verified hashes (canonical SHA256). If anyone modifies the inputs, outputs, or check results, verification detects the inconsistency. Receipts can be verified by third parties without platform access.
 
 ## What This Is NOT
 
@@ -132,11 +132,11 @@ Receipts include tamper-evident hashes (canonical SHA256). If anyone modifies th
 - **Not guardrails.** That's NeMo Guardrails, Guardrails AI, etc. They filter inputs and outputs. Sanna evaluates the logic between them.
 - **Not governance policy.** That's Credo AI, etc. They define what should happen. Sanna proves what did happen.
 
-Sanna proves reasoning integrity — the agent's output was coherent with its context, constraints, and evidence.
+Sanna runs coherence checks — verifying the agent's output was consistent with its context, constraints, and evidence.
 
 ## Status
 
-**v0.3.0** — CLI tools + `@sanna_observe` middleware decorator. Looking for design partners running agents in production.
+**v0.3.1** — CLI tools + `@sanna_observe` middleware decorator. Fingerprint now covers check results. Looking for design partners running agents in production.
 
 ## License
 

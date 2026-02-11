@@ -97,7 +97,12 @@ def verify_fingerprint(receipt: dict) -> tuple:
     output_hash = receipt.get("output_hash", "")
     checks_version = receipt.get("checks_version", "")
 
-    fingerprint_input = f"{trace_id}|{context_hash}|{output_hash}|{checks_version}"
+    # Include checks in fingerprint so tampering with check results is detected
+    checks = receipt.get("checks", [])
+    checks_data = [{"check_id": c.get("check_id", ""), "passed": c.get("passed"), "severity": c.get("severity", ""), "evidence": c.get("evidence")} for c in checks]
+    checks_hash = hash_obj(checks_data)
+
+    fingerprint_input = f"{trace_id}|{context_hash}|{output_hash}|{checks_version}|{checks_hash}"
     computed = hash_text(fingerprint_input)
     expected = receipt.get("receipt_fingerprint", "")
 
