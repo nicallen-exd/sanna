@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+
+# IDE / local config
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Environment / secrets
+.env
+
+# Test cache
+.pytest_cache/
+
+# User-generated output (not golden/receipts/ which are test fixtures)
+/receipts/

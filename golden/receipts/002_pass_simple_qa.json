@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "095ac44b3bea07b4",
+  "receipt_fingerprint": "3518219c3034372b",
+  "trace_id": "golden-002-pass-simple-qa",
+  "timestamp": "2026-02-11T03:34:53.750645+00:00",
+  "inputs": {
+    "query": "capital of France",
+    "context": "France is a country in Western Europe. Its capital city is Paris, which has served as the capital since the reign of the Capetian dynasty."
+  },
+  "outputs": {
+    "response": "The capital of France is Paris. It has been the capital since the late 10th century and serves as the country's political, economic, and cultural center."
+  },
+  "context_hash": "412fe8748d6c36e4",
+  "output_hash": "6e833ba866f7adde",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Certainty level appears appropriate (heuristic check)"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 5,
+  "checks_failed": 0,
+  "coherence_status": "PASS"
+}

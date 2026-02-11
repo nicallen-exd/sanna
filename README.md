@@ -1,0 +1,147 @@
+# Sanna — Reasoning Integrity for AI Agents
+
+Checks AI agent reasoning during execution. Halts when constraints are violated. Generates portable receipts proving governance was enforced.
+
+## The Problem
+
+Observability tools show you what happened. Guardrails filter outputs. Neither proves the reasoning was sound.
+
+When an agent makes a bad decision, teams spend hours in trace viewers reconstructing what went wrong. The traces show every step — but not whether the logic held together. Did the agent contradict its own context? Did it collapse nuance into a single answer? Did it state something with certainty when the evidence was conditional?
+
+Sanna answers **"was the reasoning valid?"** — not just **"what happened?"**
+
+## Quick Demo
+
+```python
+from sanna import sanna_observe, SannaHaltError
+
+@sanna_observe(on_violation="halt")
+def my_agent(query, context):
+    return "You are eligible for a refund."
+
+try:
+    result = my_agent(
+        query="Can I get a refund on my software?",
+        context="Digital products are non-refundable."
+    )
+except SannaHaltError as e:
+    print("HALTED!")
+    print(f"Status: {e.receipt['coherence_status']}")
+    for check in e.receipt['checks']:
+        print(f"  [{'✓' if check['passed'] else '✗'}] {check['name']}")
+```
+
+```
+HALTED!
+Status: FAIL
+  [✗] Context Contradiction
+  [✓] Mark Inferences
+  [✓] No False Certainty
+  [✓] Preserve Tensions
+  [✓] No Premature Compression
+```
+
+The context says non-refundable. The output says eligible. C1 catches the contradiction and halts execution before the agent can act on it.
+
+## Install
+
+```bash
+pip install sanna                    # Core
+pip install sanna[langfuse]          # With Langfuse trace integration
+```
+
+For development:
+
+```bash
+git clone https://github.com/nicallen-exd/sanna.git
+cd sanna
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+## The Checks
+
+| Check | Name | Severity | What it catches |
+|-------|------|----------|-----------------|
+| C1 | Context Contradiction | critical | Output contradicts explicit context statements |
+| C2 | Mark Inferences | warning | Definitive claims without hedging language |
+| C3 | No False Certainty | warning | Confidence that exceeds what the evidence supports |
+| C4 | Preserve Tensions | warning | Conflicting information collapsed into a single answer |
+| C5 | No Premature Compression | warning | Multi-faceted input reduced to a single sentence |
+
+All checks are heuristic (pattern matching). They flag for human review — they don't claim to definitively prove reasoning failure.
+
+## Three Modes
+
+| Mode | Behavior |
+|------|----------|
+| `halt` | Raises `SannaHaltError` and stops execution when a critical check fails |
+| `warn` | Returns the result but emits Python warnings for failed checks |
+| `log` | Returns the result silently; failures are recorded in the receipt only |
+
+```python
+@sanna_observe(on_violation="halt")   # Stop the agent
+@sanna_observe(on_violation="warn")   # Warn but continue
+@sanna_observe(on_violation="log")    # Silent — receipt only
+```
+
+## CLI Tools
+
+**Generate a receipt from a Langfuse trace:**
+
+```bash
+sanna-generate <trace_id>                              # Human-readable summary
+sanna-generate <trace_id> --format json -o receipt.json # Machine-readable JSON
+```
+
+**Verify a receipt offline (no network, no API keys):**
+
+```bash
+sanna-verify receipt.json                  # Human-readable
+sanna-verify receipt.json --format json    # Machine-readable
+
+# Exit codes: 0=valid, 2=schema, 3=tamper, 4=consistency
+```
+
+## Receipt Format
+
+A receipt is a self-contained JSON artifact documenting one agent decision:
+
+```
+trace_id:    golden-001-fail-c1-refund
+status:      FAIL
+checks:      4 passed, 1 failed
+
+  [✗] C1  Context Contradiction  (critical)
+      Output suggests eligibility despite 'non-refundable' in context
+  [✓] C2  Mark Inferences
+  [✓] C3  No False Certainty
+  [✓] C4  Preserve Tensions
+  [✓] C5  No Premature Compression
+
+fingerprint: 8eb30aad285f0629
+context_hash: 8f215f8ed9b85078
+output_hash:  42b19b29a5ef758b
+```
+
+Receipts include tamper-evident hashes (canonical SHA256). If anyone modifies the inputs, outputs, or check results, verification fails. Receipts can be verified by third parties without platform access.
+
+## What This Is NOT
+
+- **Not observability.** That's LangSmith, Langfuse, etc. They show what happened. Sanna checks whether the reasoning held together.
+- **Not guardrails.** That's NeMo Guardrails, Guardrails AI, etc. They filter inputs and outputs. Sanna evaluates the logic between them.
+- **Not governance policy.** That's Credo AI, etc. They define what should happen. Sanna proves what did happen.
+
+Sanna proves reasoning integrity — the agent's output was coherent with its context, constraints, and evidence.
+
+## Status
+
+**v0.3.0** — CLI tools + `@sanna_observe` middleware decorator. Looking for design partners running agents in production.
+
+## License
+
+Apache 2.0
+
+---
+
+*Sanna is Swedish for "Truth."*

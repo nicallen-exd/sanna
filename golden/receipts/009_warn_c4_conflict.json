@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "1ac62cc0ee854b8b",
+  "receipt_fingerprint": "cfdf7e4ae8a4767a",
+  "trace_id": "golden-009-warn-c4-conflict",
+  "timestamp": "2026-02-11T03:34:53.757370+00:00",
+  "inputs": {
+    "query": "license transfer policy",
+    "context": "License transfers are permitted for enterprise accounts. Individual licenses cannot be transferred. Enterprise transfer requires manager approval. All transfers are non-refundable."
+  },
+  "outputs": {
+    "response": "Yes, you can transfer your license to another person. Contact support with the new user's details."
+  },
+  "context_hash": "61f251eafde908f8",
+  "output_hash": "5a50eb24ad1a3259",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Confident claim without acknowledging conditions: \"you can\"",
+      "details": "Output confidence may exceed evidence support"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Context contains conflicting rules not reflected in output",
+      "details": "Output may have collapsed policy tensions"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 3,
+  "checks_failed": 2,
+  "coherence_status": "WARN"
+}

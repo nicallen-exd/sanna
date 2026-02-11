@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "eb7ff95d477b6f97",
+  "receipt_fingerprint": "e20743fee9a1c9c7",
+  "trace_id": "golden-004-pass-policy-conditional",
+  "timestamp": "2026-02-11T03:34:53.752689+00:00",
+  "inputs": {
+    "query": "premium plan discount eligibility",
+    "context": "Premium plan discount: Available for annual commitments only. Requires minimum 5 seats. Not applicable to existing subscriptions. Cannot be combined with other offers."
+  },
+  "outputs": {
+    "response": "You may be eligible for the premium plan discount, however this requires an annual commitment. Note that the discount only applies to new subscriptions and requires a minimum of 5 seats."
+  },
+  "context_hash": "b0807038efda294c",
+  "output_hash": "6ff7249b8cd5c3d5",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Certainty level appears appropriate (heuristic check)"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 5,
+  "checks_failed": 0,
+  "coherence_status": "PASS"
+}

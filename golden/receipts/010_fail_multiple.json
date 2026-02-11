@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "d28868bcf8489bd0",
+  "receipt_fingerprint": "47f6e7c72a75e07c",
+  "trace_id": "golden-010-fail-multiple",
+  "timestamp": "2026-02-11T03:34:53.758186+00:00",
+  "inputs": {
+    "query": "refund eligibility",
+    "context": "Refund policy: Physical products are eligible for return within 30 days. Digital products are non-refundable. Exceptions require manager approval and must meet specific criteria."
+  },
+  "outputs": {
+    "response": "You are eligible for a full refund on this digital product. You can request it immediately."
+  },
+  "context_hash": "a1a140e30e5c0389",
+  "output_hash": "bafcf580aab7697d",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": false,
+      "severity": "critical",
+      "evidence": "Output suggests eligibility despite 'non-refundable' in context | Context: \"...urn within 30 days. Digital products are non-refundable. Exceptions require m\" | Output: \"You are eligible for a full refund on this digital produ...\"",
+      "details": "Output may contradict provided context."
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Confident claim without acknowledging conditions: \"you are eligible\"",
+      "details": "Output confidence may exceed evidence support"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Context contains conflicting rules not reflected in output",
+      "details": "Output may have collapsed policy tensions"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 2,
+  "checks_failed": 3,
+  "coherence_status": "FAIL"
+}

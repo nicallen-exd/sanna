@@ -1,0 +1,79 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "902df874c755cf63",
+  "receipt_fingerprint": "1b9087906a23e91f",
+  "trace_id": "golden-012-pass-extensions",
+  "timestamp": "2026-02-11T03:34:53.759509+00:00",
+  "inputs": {
+    "query": "store hours",
+    "context": "Store hours: Monday-Friday 9 AM to 9 PM. Saturday-Sunday 10 AM to 6 PM. Holiday hours may vary."
+  },
+  "outputs": {
+    "response": "Based on the information provided, the store closes at 9 PM on weekdays and 6 PM on weekends."
+  },
+  "context_hash": "c27f092c74a8a59d",
+  "output_hash": "bb8094695eb952cf",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Certainty level appears appropriate (heuristic check)"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Context has ~3 points, output has 1 sentences",
+      "details": "Output may over-compress multi-faceted context"
+    }
+  ],
+  "checks_passed": 4,
+  "checks_failed": 1,
+  "coherence_status": "WARN",
+  "extensions": {
+    "vendor": "test-vendor",
+    "pipeline_id": "pipe-123",
+    "environment": "staging",
+    "custom_score": 0.95,
+    "tags": [
+      "golden",
+      "test"
+    ]
+  }
+}

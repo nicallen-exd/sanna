@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "d223cae1ad909715",
+  "receipt_fingerprint": "080d41d809f9f278",
+  "trace_id": "golden-005-warn-c2-inference",
+  "timestamp": "2026-02-11T03:34:53.753676+00:00",
+  "inputs": {
+    "query": "investment returns forecast",
+    "context": "Historical returns have averaged 12-18% annually. Market conditions vary. Past performance does not guarantee future results."
+  },
+  "outputs": {
+    "response": "This investment will definitely pay off. The returns are guaranteed to exceed 20% annually, and you will certainly see profits within the first quarter."
+  },
+  "context_hash": "3d99b147f3f78062",
+  "output_hash": "e7c3722fb29dc31d",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Found definitive language: definitely, certainly, guaranteed",
+      "details": "Output contains strong definitive statements"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Certainty level appears appropriate (heuristic check)"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 4,
+  "checks_failed": 1,
+  "coherence_status": "WARN"
+}

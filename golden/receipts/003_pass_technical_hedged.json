@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "1bfbd093629c15eb",
+  "receipt_fingerprint": "a291ca34deddd1cc",
+  "trace_id": "golden-003-pass-technical-hedged",
+  "timestamp": "2026-02-11T03:34:53.751592+00:00",
+  "inputs": {
+    "query": "database migration impact",
+    "context": "Database migrations can cause downtime. Index rebuilds may be required. Estimated time depends on table size and index count."
+  },
+  "outputs": {
+    "response": "The migration may cause temporary downtime. It's possible that some indexes could need rebuilding, but this likely won't exceed 15 minutes based on similar migrations."
+  },
+  "context_hash": "274335621b7c3988",
+  "output_hash": "9848907ca4256fe4",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Certainty level appears appropriate (heuristic check)"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 5,
+  "checks_failed": 0,
+  "coherence_status": "PASS"
+}

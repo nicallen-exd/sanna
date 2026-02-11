@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "6b4fc9ceff5723f4",
+  "receipt_fingerprint": "4dfdb7dbae634099",
+  "trace_id": "golden-007-warn-c5-compression",
+  "timestamp": "2026-02-11T03:34:53.755629+00:00",
+  "inputs": {
+    "query": "deployment options",
+    "context": "Deployment options include:\n- AWS with auto-scaling groups\n- GCP with Kubernetes Engine\n- Azure with App Service\n- On-premise with Docker Compose\n- Hybrid cloud with VPN tunneling\nEach option has different cost, latency, and compliance implications."
+  },
+  "outputs": {
+    "response": "Deploy to cloud."
+  },
+  "context_hash": "0a1a978e25105752",
+  "output_hash": "260194464445f7e3",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Certainty level appears appropriate (heuristic check)"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Context has ~13 points, output has 1 sentences",
+      "details": "Output may over-compress multi-faceted context"
+    }
+  ],
+  "checks_passed": 4,
+  "checks_failed": 1,
+  "coherence_status": "WARN"
+}

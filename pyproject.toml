@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sanna"
+version = "0.3.0"
+description = "Reasoning integrity infrastructure for AI agents — portable, offline-verifiable reasoning receipts"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [{name = "nicallen-exd"}]
+keywords = ["ai", "governance", "reasoning", "receipts", "verification", "observability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+dependencies = [
+    "jsonschema>=4.17",
+]
+
+[project.optional-dependencies]
+langfuse = ["langfuse>=2.0"]
+dev = ["pytest>=7.0", "jsonschema>=4.17"]
+
+[project.scripts]
+sanna-generate = "sanna.cli:main_generate"
+sanna-verify = "sanna.cli:main_verify"
+# Legacy aliases
+c3m-receipt = "sanna.cli:main_generate"
+c3m-verify = "sanna.cli:main_verify"
+
+[project.urls]
+Homepage = "https://github.com/nicallen-exd/sanna"
+Issues = "https://github.com/nicallen-exd/sanna/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sanna = ["spec/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

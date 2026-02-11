@@ -1,0 +1,69 @@
+{
+  "schema_version": "0.1",
+  "tool_version": "0.3.0",
+  "checks_version": "1",
+  "receipt_id": "5d9c7be48d94067b",
+  "receipt_fingerprint": "ab0c6eb4f65211a5",
+  "trace_id": "golden-006-warn-c3-certainty",
+  "timestamp": "2026-02-11T03:34:53.754751+00:00",
+  "inputs": {
+    "query": "API free tier",
+    "context": "Free tier available if usage is under 1000 requests/month. Requires API key registration. Rate limits apply. Exceeding limits requires paid plan upgrade."
+  },
+  "outputs": {
+    "response": "You can use the API for free. Go ahead and start making requests immediately."
+  },
+  "context_hash": "574dae21369e5d97",
+  "output_hash": "cb01811aad8717a5",
+  "final_answer_provenance": {
+    "source": "trace.output",
+    "span_id": null,
+    "span_name": null,
+    "field": "final_answer"
+  },
+  "checks": [
+    {
+      "check_id": "C1",
+      "name": "Context Contradiction",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious contradiction detected (heuristic check)"
+    },
+    {
+      "check_id": "C2",
+      "name": "Mark Inferences",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Inference marking appears adequate (heuristic check)"
+    },
+    {
+      "check_id": "C3",
+      "name": "No False Certainty",
+      "passed": false,
+      "severity": "warning",
+      "evidence": "Confident claim without acknowledging conditions: \"you can\"",
+      "details": "Output confidence may exceed evidence support"
+    },
+    {
+      "check_id": "C4",
+      "name": "Preserve Tensions",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "No obvious conflict collapse detected (heuristic check)"
+    },
+    {
+      "check_id": "C5",
+      "name": "No Premature Compression",
+      "passed": true,
+      "severity": "info",
+      "evidence": null,
+      "details": "Compression level appears appropriate (heuristic check)"
+    }
+  ],
+  "checks_passed": 4,
+  "checks_failed": 1,
+  "coherence_status": "WARN"
+}

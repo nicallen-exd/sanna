@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sanna.dev/schemas/receipt/v0.1.json",
+  "title": "Sanna Reasoning Receipt",
+  "description": "Schema for Sanna reasoning receipts - artifacts that capture AI reasoning provenance and consistency check results",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool_version",
+    "checks_version",
+    "receipt_id",
+    "receipt_fingerprint",
+    "trace_id",
+    "timestamp",
+    "inputs",
+    "outputs",
+    "context_hash",
+    "output_hash",
+    "final_answer_provenance",
+    "checks",
+    "checks_passed",
+    "checks_failed",
+    "coherence_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version (breaking changes only)",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "examples": ["0.1"]
+    },
+    "tool_version": {
+      "type": "string",
+      "description": "Tool version that generated this receipt",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "examples": ["0.3.0"]
+    },
+    "checks_version": {
+      "type": "string",
+      "description": "Version of check logic (increment when check behavior changes)",
+      "pattern": "^[0-9]+$",
+      "examples": ["1"]
+    },
+    "receipt_id": {
+      "type": "string",
+      "description": "Unique identifier for this receipt instance (changes per run)",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "receipt_fingerprint": {
+      "type": "string",
+      "description": "Stable identifier for this trace content (same across runs of same trace)",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Source trace identifier from observability platform",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO 8601 timestamp when receipt was generated",
+      "format": "date-time"
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Inputs to the AI system for this trace",
+      "properties": {
+        "query": {
+          "type": ["string", "null"],
+          "description": "User query or prompt"
+        },
+        "context": {
+          "type": ["string", "null"],
+          "description": "Retrieved context provided to the model"
+        }
+      },
+      "additionalProperties": true
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Outputs from the AI system",
+      "properties": {
+        "response": {
+          "type": ["string", "null"],
+          "description": "Final answer/response from the model"
+        }
+      },
+      "additionalProperties": true
+    },
+    "context_hash": {
+      "type": "string",
+      "description": "SHA256 hash (truncated) of canonicalized inputs",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "output_hash": {
+      "type": "string",
+      "description": "SHA256 hash (truncated) of canonicalized outputs",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "final_answer_provenance": {
+      "type": "object",
+      "description": "Tracks where the final answer was selected from in multi-step traces",
+      "required": ["source"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Where the final answer came from",
+          "enum": ["trace.output", "span.output", "none"]
+        },
+        "span_id": {
+          "type": ["string", "null"],
+          "description": "ID of the span if source is span.output"
+        },
+        "span_name": {
+          "type": ["string", "null"],
+          "description": "Name of the span if source is span.output"
+        },
+        "field": {
+          "type": ["string", "null"],
+          "description": "Field name where answer was found"
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "description": "Results of consistency checks (C1-C5)",
+      "items": {
+        "$ref": "#/$defs/CheckResult"
+      },
+      "minItems": 1
+    },
+    "checks_passed": {
+      "type": "integer",
+      "description": "Number of checks that passed",
+      "minimum": 0
+    },
+    "checks_failed": {
+      "type": "integer",
+      "description": "Number of checks that failed",
+      "minimum": 0
+    },
+    "coherence_status": {
+      "type": "string",
+      "description": "Overall status derived from check results",
+      "enum": ["PASS", "WARN", "FAIL"]
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Optional vendor-specific metadata. Ignored by verifier but preserved in receipt.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "CheckResult": {
+      "type": "object",
+      "description": "Result of a single coherence check",
+      "required": ["check_id", "name", "passed", "severity"],
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "description": "Check identifier (C1-C5)",
+          "pattern": "^C[1-5]$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable check name",
+          "minLength": 1
+        },
+        "passed": {
+          "type": "boolean",
+          "description": "Whether the check passed"
+        },
+        "severity": {
+          "type": "string",
+          "description": "Severity level if check fails",
+          "enum": ["info", "warning", "critical"]
+        },
+        "evidence": {
+          "type": ["string", "null"],
+          "description": "Evidence for failure (snippets from context/output)"
+        },
+        "details": {
+          "type": ["string", "null"],
+          "description": "Additional details about check result"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
