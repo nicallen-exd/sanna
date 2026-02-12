@@ -22,3 +22,7 @@ build/
 
 # User-generated output (not golden/receipts/ which are test fixtures)
 /receipts/
+
+# Signed constitutions generated during testing
+*.signed.yaml
+*.signed.json

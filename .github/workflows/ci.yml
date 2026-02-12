@@ -37,3 +37,6 @@ jobs:
             fi
           done
           echo "All golden receipts verified."
+
+      - name: Verify example constitution
+        run: sanna-sign-constitution examples/customer_support_constitution.yaml --verify-only

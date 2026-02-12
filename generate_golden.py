@@ -4,6 +4,8 @@ Generate golden test receipts using the actual Sanna check implementations.
 
 Run this whenever check logic changes to regenerate golden receipts.
 Golden receipts are used by the test suite for regression testing.
+
+Usage:  python generate_golden.py
 """
 
 import json
