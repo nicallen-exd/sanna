@@ -6,6 +6,7 @@ can_execute allowlisting, evaluation order, backward compatibility,
 escalation execution (log/webhook/callback), and callback registry.
 """
 
+import importlib.util
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -456,6 +457,10 @@ class TestEscalationLog:
 # 7. Escalation execution — webhook
 # =============================================================================
 
+@pytest.mark.skipif(
+    not importlib.util.find_spec("httpx"),
+    reason="httpx not installed",
+)
 class TestEscalationWebhook:
     def test_webhook_success(self):
         target = EscalationTarget(type="webhook", url="https://hooks.example.com/alert")
