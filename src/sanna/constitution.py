@@ -79,6 +79,13 @@ class AgentIdentity:
 
 
 @dataclass
+class Invariant:
+    id: str           # INV_NO_FABRICATION, INV_CUSTOM_*, etc.
+    rule: str         # Human-readable description
+    enforcement: str  # "halt" | "warn" | "log"
+
+
+@dataclass
 class Constitution:
     schema_version: str
     identity: AgentIdentity
@@ -86,6 +93,7 @@ class Constitution:
     boundaries: list[Boundary]
     trust_tiers: TrustTiers = field(default_factory=TrustTiers)
     halt_conditions: list[HaltCondition] = field(default_factory=list)
+    invariants: list[Invariant] = field(default_factory=list)
     document_hash: Optional[str] = None
     signed_at: Optional[str] = None
 
@@ -185,6 +193,26 @@ def validate_constitution_data(data: dict) -> list[str]:
             if enf not in VALID_ENFORCEMENT:
                 errors.append(f"halt_conditions[{i}].enforcement '{enf}' must be one of {sorted(VALID_ENFORCEMENT)}")
 
+    # Invariants (optional)
+    invariants = data.get("invariants", [])
+    if isinstance(invariants, list):
+        seen_inv_ids: set[str] = set()
+        for i, inv in enumerate(invariants):
+            if not isinstance(inv, dict):
+                errors.append(f"invariants[{i}] must be a dict")
+                continue
+            inv_id = inv.get("id", "")
+            if not inv_id:
+                errors.append(f"invariants[{i}].id is required")
+            if inv_id in seen_inv_ids:
+                errors.append(f"Duplicate invariant ID: {inv_id}")
+            seen_inv_ids.add(inv_id)
+            if not inv.get("rule"):
+                errors.append(f"invariants[{i}].rule is required")
+            enf = inv.get("enforcement", "")
+            if enf not in VALID_ENFORCEMENT:
+                errors.append(f"invariants[{i}].enforcement '{enf}' must be one of {sorted(VALID_ENFORCEMENT)}")
+
     return errors
 
 
@@ -251,6 +279,15 @@ def parse_constitution(data: dict) -> Constitution:
         for h in data.get("halt_conditions", [])
     ]
 
+    invariants = [
+        Invariant(
+            id=inv["id"],
+            rule=inv["rule"],
+            enforcement=inv["enforcement"],
+        )
+        for inv in data.get("invariants", [])
+    ]
+
     return Constitution(
         schema_version=str(schema_version),
         identity=identity,
@@ -258,6 +295,7 @@ def parse_constitution(data: dict) -> Constitution:
         boundaries=boundaries,
         trust_tiers=trust_tiers,
         halt_conditions=halt_conditions,
+        invariants=invariants,
         document_hash=data.get("document_hash"),
         signed_at=data.get("signed_at"),
     )
@@ -290,11 +328,17 @@ def compute_constitution_hash(constitution: Constitution) -> str:
         "prohibited": sorted(constitution.trust_tiers.prohibited),
     }
 
+    invariants = sorted(
+        [asdict(inv) for inv in constitution.invariants],
+        key=lambda inv: inv["id"],
+    )
+
     hashable = {
         "identity": asdict(constitution.identity),
         "boundaries": boundaries,
         "trust_tiers": trust_tiers,
         "halt_conditions": halt_conditions,
+        "invariants": invariants,
     }
 
     canonical = json.dumps(hashable, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -311,6 +355,7 @@ def sign_constitution(constitution: Constitution) -> Constitution:
         boundaries=constitution.boundaries,
         trust_tiers=constitution.trust_tiers,
         halt_conditions=constitution.halt_conditions,
+        invariants=constitution.invariants,
         document_hash=doc_hash,
         signed_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -375,6 +420,8 @@ def constitution_to_dict(constitution: Constitution) -> dict:
     result["boundaries"] = [asdict(b) for b in constitution.boundaries]
     result["trust_tiers"] = asdict(constitution.trust_tiers)
     result["halt_conditions"] = [asdict(h) for h in constitution.halt_conditions]
+    if constitution.invariants:
+        result["invariants"] = [asdict(inv) for inv in constitution.invariants]
     result["document_hash"] = constitution.document_hash
     result["signed_at"] = constitution.signed_at
     return result

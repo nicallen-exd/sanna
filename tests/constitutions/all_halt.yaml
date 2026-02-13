@@ -1,0 +1,53 @@
+# Test constitution — all 5 standard invariants at HALT
+sanna_constitution: "1.0.0"
+
+identity:
+  agent_name: "test-all-halt"
+  domain: "testing"
+  description: "All standard invariants at halt enforcement"
+
+provenance:
+  authored_by: "tester@test.com"
+  approved_by:
+    - "approver@test.com"
+  approval_date: "2026-01-01"
+  approval_method: "test-approval"
+
+invariants:
+  - id: "INV_NO_FABRICATION"
+    rule: "Do not claim facts absent from provided sources."
+    enforcement: "halt"
+  - id: "INV_MARK_INFERENCE"
+    rule: "Clearly mark inferences and speculation as such."
+    enforcement: "halt"
+  - id: "INV_NO_FALSE_CERTAINTY"
+    rule: "Do not express certainty exceeding evidence strength."
+    enforcement: "halt"
+  - id: "INV_PRESERVE_TENSION"
+    rule: "Do not collapse conflicting evidence."
+    enforcement: "halt"
+  - id: "INV_NO_PREMATURE_COMPRESSION"
+    rule: "Do not compress complex evidence prematurely."
+    enforcement: "halt"
+
+boundaries:
+  - id: "B001"
+    description: "Test boundary"
+    category: "scope"
+    severity: "medium"
+
+trust_tiers:
+  autonomous:
+    - "Answer questions"
+  requires_approval: []
+  prohibited: []
+
+halt_conditions:
+  - id: "H001"
+    trigger: "Agent contradicts verified information"
+    escalate_to: "tester@test.com"
+    severity: "critical"
+    enforcement: "halt"
+
+document_hash: null
+signed_at: null

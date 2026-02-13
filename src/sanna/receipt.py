@@ -15,9 +15,9 @@ from .hashing import hash_text, hash_obj
 # VERSION CONSTANTS
 # =============================================================================
 
-TOOL_VERSION = "0.5.0"
+TOOL_VERSION = "0.6.0"
 SCHEMA_VERSION = "0.1"
-CHECKS_VERSION = "1"  # Increment when check logic changes
+CHECKS_VERSION = "2"  # Incremented: constitution-driven enforcement
 
 
 # =============================================================================
@@ -234,7 +234,7 @@ def find_snippet(text: str, keywords: list, max_len: int = 80) -> str:
 # C1-C5 HEURISTIC CHECKS
 # =============================================================================
 
-def check_c1_context_contradiction(context: str, output: str) -> CheckResult:
+def check_c1_context_contradiction(context: str, output: str, enforcement: str = "halt") -> CheckResult:
     """
     C1: Context Contradiction
     Check if output contradicts explicit statements in context.
@@ -289,7 +289,7 @@ def check_c1_context_contradiction(context: str, output: str) -> CheckResult:
     )
 
 
-def check_c2_unmarked_inference(context: str, output: str) -> CheckResult:
+def check_c2_unmarked_inference(context: str, output: str, enforcement: str = "warn") -> CheckResult:
     """
     C2: Mark Inferences
     Check if speculative/inferential statements are properly hedged.
@@ -327,7 +327,7 @@ def check_c2_unmarked_inference(context: str, output: str) -> CheckResult:
     )
 
 
-def check_c3_false_certainty(context: str, output: str) -> CheckResult:
+def check_c3_false_certainty(context: str, output: str, enforcement: str = "warn") -> CheckResult:
     """
     C3: No False Certainty
     Check if confidence level matches evidence strength.
@@ -367,7 +367,7 @@ def check_c3_false_certainty(context: str, output: str) -> CheckResult:
     )
 
 
-def check_c4_conflict_collapse(context: str, output: str) -> CheckResult:
+def check_c4_conflict_collapse(context: str, output: str, enforcement: str = "warn") -> CheckResult:
     """
     C4: Preserve Tensions
     Check if conflicting information is preserved rather than collapsed.
@@ -407,7 +407,7 @@ def check_c4_conflict_collapse(context: str, output: str) -> CheckResult:
     )
 
 
-def check_c5_premature_compression(context: str, output: str) -> CheckResult:
+def check_c5_premature_compression(context: str, output: str, enforcement: str = "warn") -> CheckResult:
     """
     C5: No Premature Compression
     Check if output appropriately represents complexity of input.

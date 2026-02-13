@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.5.0",
-  "checks_version": "1",
+  "tool_version": "0.6.0",
+  "checks_version": "2",
   "receipt_id": "d223cae1ad909715",
-  "receipt_fingerprint": "151920337380ab60",
+  "receipt_fingerprint": "f3ba074931f782a2",
   "trace_id": "golden-005-warn-c2-inference",
-  "timestamp": "2026-02-11T21:36:49.213597+00:00",
+  "timestamp": "2026-02-13T00:37:54.689784+00:00",
   "inputs": {
     "query": "investment returns forecast",
     "context": "Historical returns have averaged 12-18% annually. Market conditions vary. Past performance does not guarantee future results."

@@ -5,7 +5,7 @@ Generates portable, offline-verifiable "reasoning receipts" that document
 AI agent decisions with C1-C5 coherence checks and consistency-verified hashing.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from .hashing import hash_text, hash_obj, canonicalize_text
 from .receipt import (
@@ -30,6 +30,7 @@ from .constitution import (
     TrustTiers,
     Provenance,
     AgentIdentity,
+    Invariant,
     load_constitution,
     parse_constitution,
     validate_constitution_data,
@@ -39,6 +40,12 @@ from .constitution import (
     constitution_to_dict,
     save_constitution,
     scaffold_constitution,
+)
+from .enforcement import (
+    CheckConfig,
+    CustomInvariantRecord,
+    configure_checks,
+    INVARIANT_CHECK_MAP,
 )
 
 __all__ = [
@@ -78,4 +85,9 @@ __all__ = [
     "constitution_to_dict",
     "save_constitution",
     "scaffold_constitution",
+    "Invariant",
+    "CheckConfig",
+    "CustomInvariantRecord",
+    "configure_checks",
+    "INVARIANT_CHECK_MAP",
 ]

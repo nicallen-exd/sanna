@@ -98,6 +98,7 @@ def export_receipt(
     trace_data: Any,
     extensions: dict[str, Any] | None = None,
     constitution: Any | None = None,
+    constitution_path: str | None = None,
 ) -> dict[str, Any]:
     """Generate a Sanna receipt from a Langfuse trace.
 
@@ -105,6 +106,9 @@ def export_receipt(
         trace_data: Langfuse trace data object.
         extensions: Optional vendor-specific metadata.
         constitution: Optional ConstitutionProvenance for governance tracking.
+        constitution_path: Optional path to a constitution YAML/JSON file.
+            When provided, the constitution's invariants drive which checks
+            run and at what enforcement level (v0.6.0).
 
     Returns:
         Receipt as a JSON-serializable dict.
@@ -112,6 +116,37 @@ def export_receipt(
     from sanna.receipt import generate_receipt
 
     trace_dict = langfuse_trace_to_trace_data(trace_data)
+
+    if constitution_path is not None:
+        # v0.6.0: Use constitution-driven enforcement
+        from sanna.constitution import load_constitution, sign_constitution, constitution_to_receipt_ref
+        from sanna.enforcement import configure_checks
+        from sanna.middleware import _generate_constitution_receipt, _generate_no_invariants_receipt
+
+        loaded = load_constitution(constitution_path)
+        if not loaded.document_hash:
+            loaded = sign_constitution(loaded)
+        const_ref = constitution_to_receipt_ref(loaded)
+        check_configs, custom_records = configure_checks(loaded)
+
+        if check_configs or custom_records:
+            receipt_dict = _generate_constitution_receipt(
+                trace_dict,
+                check_configs=check_configs,
+                custom_records=custom_records,
+                constitution_ref=const_ref,
+                constitution_version=loaded.schema_version,
+                extensions={"langfuse": extensions} if extensions else None,
+            )
+        else:
+            receipt_dict = _generate_no_invariants_receipt(
+                trace_dict,
+                constitution_ref=const_ref,
+                extensions={"langfuse": extensions} if extensions else None,
+            )
+        return receipt_dict
+
+    # Legacy path: generate receipt without constitution enforcement
     receipt = generate_receipt(trace_dict, constitution=constitution)
     receipt_dict = asdict(receipt)
 

@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.5.0",
-  "checks_version": "1",
+  "tool_version": "0.6.0",
+  "checks_version": "2",
   "receipt_id": "902df874c755cf63",
-  "receipt_fingerprint": "9e3d1a3cc6124539",
+  "receipt_fingerprint": "002b9babe6f9b14e",
   "trace_id": "golden-012-pass-extensions",
-  "timestamp": "2026-02-11T21:36:49.216115+00:00",
+  "timestamp": "2026-02-13T00:37:54.691936+00:00",
   "inputs": {
     "query": "store hours",
     "context": "Store hours: Monday-Friday 9 AM to 9 PM. Saturday-Sunday 10 AM to 6 PM. Holiday hours may vary."

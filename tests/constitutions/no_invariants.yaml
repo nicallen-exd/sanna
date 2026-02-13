@@ -1,0 +1,23 @@
+# Test constitution — no invariants section
+sanna_constitution: "1.0.0"
+
+identity:
+  agent_name: "test-no-invariants"
+  domain: "testing"
+  description: "Constitution with no invariants"
+
+provenance:
+  authored_by: "tester@test.com"
+  approved_by:
+    - "approver@test.com"
+  approval_date: "2026-01-01"
+  approval_method: "test-approval"
+
+boundaries:
+  - id: "B001"
+    description: "Test boundary"
+    category: "scope"
+    severity: "medium"
+
+document_hash: null
+signed_at: null

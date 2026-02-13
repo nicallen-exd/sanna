@@ -1,5 +1,7 @@
 """
 Tests for HaltEvent — enforcement action recording in receipts.
+
+v0.6.0: Middleware tests updated to use constitution-driven enforcement.
 """
 
 import json
@@ -7,6 +9,7 @@ import warnings
 import pytest
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sanna.receipt import (
     generate_receipt,
@@ -19,6 +22,10 @@ from sanna.verify import verify_receipt, load_schema, verify_fingerprint
 from sanna.middleware import sanna_observe, SannaHaltError, SannaResult
 
 SCHEMA = load_schema()
+
+CONSTITUTIONS_DIR = Path(__file__).parent / "constitutions"
+ALL_HALT_CONST = str(CONSTITUTIONS_DIR / "all_halt.yaml")
+ALL_WARN_CONST = str(CONSTITUTIONS_DIR / "all_warn.yaml")
 
 REFUND_CONTEXT = (
     "Our refund policy: Physical products can be returned within 30 days. "
@@ -200,8 +207,8 @@ class TestVerifierHaltWarning:
 
 class TestMiddlewareHaltEvent:
     def test_halt_creates_halt_event(self):
-        """@sanna_observe with on_violation='halt' should auto-create halt_event."""
-        @sanna_observe(on_violation="halt")
+        """@sanna_observe with halt constitution should auto-create halt_event."""
+        @sanna_observe(constitution_path=ALL_HALT_CONST)
         def agent(query: str, context: str) -> str:
             return REFUND_BAD_OUTPUT
 
@@ -216,7 +223,7 @@ class TestMiddlewareHaltEvent:
 
     def test_halt_receipt_with_halt_event_verifies(self):
         """Receipt with auto-created halt_event should pass verification."""
-        @sanna_observe(on_violation="halt")
+        @sanna_observe(constitution_path=ALL_HALT_CONST)
         def agent(query: str, context: str) -> str:
             return REFUND_BAD_OUTPUT
 
@@ -229,7 +236,7 @@ class TestMiddlewareHaltEvent:
 
     def test_pass_no_halt_event(self):
         """Passing agent should NOT have a halt_event."""
-        @sanna_observe(on_violation="halt")
+        @sanna_observe(constitution_path=ALL_HALT_CONST)
         def agent(query: str, context: str) -> str:
             return SIMPLE_OUTPUT
 
@@ -238,7 +245,7 @@ class TestMiddlewareHaltEvent:
 
     def test_warn_no_halt_event(self):
         """Warn mode should NOT create a halt_event (only halt mode does)."""
-        @sanna_observe(on_violation="warn")
+        @sanna_observe(constitution_path=ALL_WARN_CONST)
         def agent(query: str, context: str) -> str:
             return REFUND_BAD_OUTPUT
 
@@ -250,14 +257,7 @@ class TestMiddlewareHaltEvent:
 
     def test_middleware_with_constitution_and_halt(self):
         """Middleware with constitution should include both in halt receipt."""
-        constitution = ConstitutionProvenance(
-            document_id="policy-v2",
-            document_hash=hash_text("No refunds on digital."),
-            version="2.0",
-            source="policy-repo",
-        )
-
-        @sanna_observe(on_violation="halt", constitution=constitution)
+        @sanna_observe(constitution_path=ALL_HALT_CONST)
         def agent(query: str, context: str) -> str:
             return REFUND_BAD_OUTPUT
 
@@ -266,7 +266,6 @@ class TestMiddlewareHaltEvent:
 
         receipt = exc_info.value.receipt
         assert receipt["constitution_ref"] is not None
-        assert receipt["constitution_ref"]["document_id"] == "policy-v2"
         assert receipt["halt_event"] is not None
         assert receipt["halt_event"]["halted"] is True
 

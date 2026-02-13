@@ -99,7 +99,22 @@ def verify_fingerprint(receipt: dict) -> tuple:
 
     # Include checks in fingerprint so tampering with check results is detected
     checks = receipt.get("checks", [])
-    checks_data = [{"check_id": c.get("check_id", ""), "passed": c.get("passed"), "severity": c.get("severity", ""), "evidence": c.get("evidence")} for c in checks]
+    # v0.6.0: include triggered_by and enforcement_level in fingerprint if present
+    has_enforcement_fields = any(c.get("triggered_by") is not None for c in checks)
+    if has_enforcement_fields:
+        checks_data = [
+            {
+                "check_id": c.get("check_id", ""),
+                "passed": c.get("passed"),
+                "severity": c.get("severity", ""),
+                "evidence": c.get("evidence"),
+                "triggered_by": c.get("triggered_by"),
+                "enforcement_level": c.get("enforcement_level"),
+            }
+            for c in checks
+        ]
+    else:
+        checks_data = [{"check_id": c.get("check_id", ""), "passed": c.get("passed"), "severity": c.get("severity", ""), "evidence": c.get("evidence")} for c in checks]
     checks_hash = hash_obj(checks_data)
 
     # Include constitution_ref and halt_event in fingerprint
@@ -127,9 +142,11 @@ def verify_status_consistency(receipt: dict) -> tuple:
     Returns (matches, computed, expected)
     """
     checks = receipt.get("checks", [])
+    # Exclude NOT_CHECKED custom invariants from status computation
+    standard_checks = [c for c in checks if c.get("status") != "NOT_CHECKED"]
 
-    critical_fails = sum(1 for c in checks if not c.get("passed") and c.get("severity") == "critical")
-    warning_fails = sum(1 for c in checks if not c.get("passed") and c.get("severity") == "warning")
+    critical_fails = sum(1 for c in standard_checks if not c.get("passed") and c.get("severity") == "critical")
+    warning_fails = sum(1 for c in standard_checks if not c.get("passed") and c.get("severity") == "warning")
 
     if critical_fails > 0:
         computed = "FAIL"
@@ -146,9 +163,11 @@ def verify_check_counts(receipt: dict) -> list:
     """Verify checks_passed and checks_failed match actual check results."""
     errors = []
     checks = receipt.get("checks", [])
+    # Exclude NOT_CHECKED custom invariants from count verification
+    standard_checks = [c for c in checks if c.get("status") != "NOT_CHECKED"]
 
-    actual_passed = sum(1 for c in checks if c.get("passed"))
-    actual_failed = len(checks) - actual_passed
+    actual_passed = sum(1 for c in standard_checks if c.get("passed"))
+    actual_failed = len(standard_checks) - actual_passed
 
     if receipt.get("checks_passed") != actual_passed:
         errors.append(f"checks_passed mismatch: got {receipt.get('checks_passed')}, expected {actual_passed}")

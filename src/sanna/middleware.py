@@ -1,12 +1,12 @@
 """
 Sanna middleware — runtime enforcement decorator for AI agent pipelines.
 
-@sanna_observe wraps agent functions, captures I/O, runs C1-C5 coherence
-checks after execution, and enforces policy (halt/warn/log). Every execution
-produces a reasoning receipt.
+@sanna_observe wraps agent functions, captures I/O, runs coherence checks
+driven by constitution invariants, and enforces policy (halt/warn/log) per
+check. Every execution produces a reasoning receipt.
 
-TODO: async support (Phase 2)
-TODO: mid-execution checkpoints (Phase 2)
+v0.6.0: The constitution is the control plane. Invariants drive which checks
+run and at what enforcement level.
 """
 
 import functools
@@ -35,6 +35,10 @@ from .receipt import (
     TOOL_VERSION,
     SCHEMA_VERSION,
     CHECKS_VERSION,
+    select_final_answer,
+    extract_context,
+    extract_query,
+    FinalAnswerProvenance,
 )
 from .hashing import hash_text, hash_obj
 
@@ -60,7 +64,7 @@ _OUTPUT_PARAM_NAMES = {"response", "output", "answer", "result"}
 # =============================================================================
 
 class SannaHaltError(Exception):
-    """Raised when reasoning checks fail and on_violation='halt'."""
+    """Raised when reasoning checks fail and enforcement_level='halt'."""
 
     def __init__(self, message: str, receipt: dict):
         super().__init__(message)
@@ -201,69 +205,67 @@ def _build_trace_data(
 
 
 # =============================================================================
-# RECEIPT GENERATION WITH CHECK SUBSET
+# CONSTITUTION-DRIVEN RECEIPT GENERATION
 # =============================================================================
 
-def _generate_receipt_with_checks(
+def _generate_constitution_receipt(
     trace_data: dict,
-    checks: Sequence[str],
+    check_configs: list,
+    custom_records: list,
+    constitution_ref: Optional[dict],
+    constitution_version: str,
     extensions: Optional[dict] = None,
-    constitution: Optional[ConstitutionProvenance] = None,
     halt_event: Optional[HaltEvent] = None,
-    constitution_ref_override: Optional[dict] = None,
 ) -> dict:
+    """Generate a receipt using constitution-driven check configs.
+
+    Runs only the checks specified by check_configs, at their enforcement
+    levels, and includes custom invariant records as NOT_CHECKED.
     """
-    Generate a receipt, optionally running only a subset of checks.
-
-    If checks is the full set ["C1"..."C5"], delegates entirely to
-    generate_receipt(). Otherwise runs only the requested checks and
-    assembles the receipt manually (reusing the same hashing/fingerprint
-    logic).
-
-    Args:
-        constitution_ref_override: Rich dict to use directly as constitution_ref
-            in both the fingerprint and the receipt body. Takes precedence over
-            the ``constitution`` parameter.
-    """
-    all_check_ids = sorted(_CHECK_FUNCTIONS.keys())
-    requested = sorted(checks)
-
-    if requested == all_check_ids:
-        # Full check set — use existing pipeline directly
-        receipt_obj = generate_receipt(
-            trace_data,
-            constitution=constitution,
-            halt_event=halt_event,
-            constitution_ref_override=constitution_ref_override,
-        )
-        receipt_dict = asdict(receipt_obj)
-        if extensions:
-            receipt_dict["extensions"] = extensions
-        return receipt_dict
-
-    # Subset of checks — run only the requested ones
-    from .receipt import (
-        select_final_answer,
-        extract_context,
-        extract_query,
-        FinalAnswerProvenance,
-    )
-
     final_answer, answer_provenance = select_final_answer(trace_data)
     context = extract_context(trace_data)
     query_text = extract_query(trace_data)
 
-    check_results: List[CheckResult] = []
-    for cid in requested:
-        fn = _CHECK_FUNCTIONS.get(cid)
-        if fn:
-            check_results.append(fn(context, final_answer))
+    # Run configured checks
+    check_results = []
+    for cfg in check_configs:
+        result = cfg.check_fn(context, final_answer, enforcement=cfg.enforcement_level)
+        check_results.append({
+            "check_id": cfg.check_id,
+            "name": result.name,
+            "passed": result.passed,
+            "severity": result.severity,
+            "evidence": result.evidence,
+            "details": result.details,
+            "triggered_by": cfg.triggered_by,
+            "enforcement_level": cfg.enforcement_level,
+            "constitution_version": constitution_version,
+        })
 
-    passed = sum(1 for c in check_results if c.passed)
-    failed = len(check_results) - passed
+    # Add custom invariants as NOT_CHECKED
+    for custom in custom_records:
+        check_results.append({
+            "check_id": custom.invariant_id,
+            "name": "Custom Invariant",
+            "passed": True,  # NOT_CHECKED counts as not-failed
+            "severity": "info",
+            "evidence": None,
+            "details": custom.rule,
+            "triggered_by": custom.invariant_id,
+            "enforcement_level": custom.enforcement,
+            "constitution_version": constitution_version,
+            "status": custom.status,
+            "reason": custom.reason,
+        })
 
-    critical_fails = sum(1 for c in check_results if not c.passed and c.severity == "critical")
-    warning_fails = sum(1 for c in check_results if not c.passed and c.severity == "warning")
+    # Count pass/fail (custom invariants don't count as failures)
+    standard_checks = [c for c in check_results if not c.get("status") == "NOT_CHECKED"]
+    passed = sum(1 for c in standard_checks if c["passed"])
+    failed = len(standard_checks) - passed
+
+    # Determine status from standard checks only
+    critical_fails = sum(1 for c in standard_checks if not c["passed"] and c["severity"] == "critical")
+    warning_fails = sum(1 for c in standard_checks if not c["passed"] and c["severity"] == "warning")
 
     if critical_fails > 0:
         status = "FAIL"
@@ -278,18 +280,23 @@ def _generate_receipt_with_checks(
     context_hash = hash_obj(inputs)
     output_hash = hash_obj(outputs)
 
-    # Resolve constitution_ref: override takes precedence over legacy dataclass
-    if constitution_ref_override is not None:
-        constitution_dict = constitution_ref_override
-    else:
-        constitution_dict = asdict(constitution) if constitution else None
-
+    constitution_hash_val = hash_obj(constitution_ref) if constitution_ref else ""
     halt_event_dict = asdict(halt_event) if halt_event else None
-    constitution_hash_val = hash_obj(constitution_dict) if constitution_dict else ""
     halt_hash_val = hash_obj(halt_event_dict) if halt_event_dict else ""
 
-    checks_data = [{"check_id": c.check_id, "passed": c.passed, "severity": c.severity, "evidence": c.evidence} for c in check_results]
-    checks_hash = hash_obj(checks_data)
+    # Build fingerprint from check results (include triggered_by and enforcement_level)
+    checks_fingerprint_data = [
+        {
+            "check_id": c["check_id"],
+            "passed": c["passed"],
+            "severity": c["severity"],
+            "evidence": c["evidence"],
+            "triggered_by": c.get("triggered_by"),
+            "enforcement_level": c.get("enforcement_level"),
+        }
+        for c in check_results
+    ]
+    checks_hash = hash_obj(checks_fingerprint_data)
     fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}|{constitution_hash_val}|{halt_hash_val}"
     receipt_fingerprint = hash_text(fingerprint_input)
 
@@ -306,11 +313,11 @@ def _generate_receipt_with_checks(
         "context_hash": context_hash,
         "output_hash": output_hash,
         "final_answer_provenance": asdict(answer_provenance),
-        "checks": [asdict(c) for c in check_results],
+        "checks": check_results,
         "checks_passed": passed,
         "checks_failed": failed,
         "coherence_status": status,
-        "constitution_ref": constitution_dict,
+        "constitution_ref": constitution_ref,
         "halt_event": halt_event_dict,
     }
 
@@ -320,194 +327,56 @@ def _generate_receipt_with_checks(
     return receipt_dict
 
 
-# =============================================================================
-# ENFORCEMENT
-# =============================================================================
+def _generate_no_invariants_receipt(
+    trace_data: dict,
+    constitution_ref: Optional[dict],
+    extensions: Optional[dict] = None,
+) -> dict:
+    """Generate a receipt for a constitution with no invariants.
 
-def _should_halt(receipt: dict, halt_on: Sequence[str]) -> bool:
-    """Determine if any failed check has a severity in halt_on."""
-    for check in receipt.get("checks", []):
-        if not check.get("passed") and check.get("severity") in halt_on:
-            return True
-    return False
-
-
-# =============================================================================
-# THE DECORATOR
-# =============================================================================
-
-def sanna_observe(
-    _func=None,
-    *,
-    on_violation: str = "halt",
-    checks: Optional[List[str]] = None,
-    halt_on: Optional[List[str]] = None,
-    receipt_dir: Optional[str] = None,
-    context_param: Optional[str] = None,
-    query_param: Optional[str] = None,
-    constitution: Optional[ConstitutionProvenance] = None,
-    constitution_path: Optional[str] = None,
-):
+    No checks run. The receipt documents that no invariants were defined.
     """
-    Decorator that wraps an agent function with Sanna coherence checks.
+    final_answer, answer_provenance = select_final_answer(trace_data)
+    context = extract_context(trace_data)
+    query_text = extract_query(trace_data)
 
-    After the wrapped function executes, builds a trace from captured I/O,
-    runs the configured checks, generates a receipt, and enforces the
-    violation policy.
+    inputs = {"query": query_text if query_text else None, "context": context if context else None}
+    outputs = {"response": final_answer if final_answer else None}
 
-    Args:
-        on_violation: "halt" | "warn" | "log"
-            - "halt": raise SannaHaltError if checks fail at halt severity
-            - "warn": return SannaResult, emit warnings.warn
-            - "log": return SannaResult, log only
-        checks: Which checks to run, e.g. ["C1", "C3"]. Default: all.
-        halt_on: Severity levels that trigger halt. Default: ["critical"].
-        receipt_dir: Directory to write receipt JSON. None to skip.
-        context_param: Explicit name of the context parameter.
-        query_param: Explicit name of the query parameter.
-        constitution: Optional ConstitutionProvenance for governance tracking.
-        constitution_path: Path to a Sanna constitution YAML/JSON file.
-            Loaded and signed at decoration time; the rich constitution_ref
-            dict flows through the entire pipeline (fingerprint + receipt body).
-            Takes precedence over the ``constitution`` parameter.
+    context_hash = hash_obj(inputs)
+    output_hash = hash_obj(outputs)
 
-    Returns:
-        SannaResult wrapping the function output and receipt, or raises
-        SannaHaltError if policy dictates halt.
-    """
-    if checks is None:
-        checks = list(_CHECK_FUNCTIONS.keys())
-    if halt_on is None:
-        halt_on = ["critical"]
+    constitution_hash_val = hash_obj(constitution_ref) if constitution_ref else ""
 
-    if on_violation not in ("halt", "warn", "log"):
-        raise ValueError(f"on_violation must be 'halt', 'warn', or 'log', got {on_violation!r}")
+    checks_hash = hash_obj([])
+    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}|{constitution_hash_val}|"
+    receipt_fingerprint = hash_text(fingerprint_input)
 
-    # Decoration-time constitution loading: load, sign, build receipt ref once
-    constitution_ref_override = None
-    if constitution_path is not None:
-        from .constitution import load_constitution, sign_constitution, constitution_to_receipt_ref
-        loaded = load_constitution(constitution_path)
-        if not loaded.document_hash:
-            loaded = sign_constitution(loaded)
-        constitution_ref_override = constitution_to_receipt_ref(loaded)
-        logger.info(
-            "Constitution loaded from %s (hash=%s)",
-            constitution_path,
-            loaded.document_hash[:16],
-        )
+    receipt_dict = {
+        "schema_version": SCHEMA_VERSION,
+        "tool_version": TOOL_VERSION,
+        "checks_version": CHECKS_VERSION,
+        "receipt_id": hash_text(f"{trace_data['trace_id']}{datetime.now(timezone.utc).isoformat()}"),
+        "receipt_fingerprint": receipt_fingerprint,
+        "trace_id": trace_data["trace_id"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "inputs": inputs,
+        "outputs": outputs,
+        "context_hash": context_hash,
+        "output_hash": output_hash,
+        "final_answer_provenance": asdict(answer_provenance),
+        "checks": [],
+        "checks_passed": 0,
+        "checks_failed": 0,
+        "coherence_status": "PASS",
+        "constitution_ref": constitution_ref,
+        "halt_event": None,
+    }
 
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            trace_id = f"sanna-{uuid.uuid4().hex[:12]}"
+    if extensions:
+        receipt_dict["extensions"] = extensions
 
-            # 1. Capture inputs
-            resolved = _resolve_inputs(func, args, kwargs, context_param, query_param)
-
-            # 2. Execute the wrapped function
-            start_ms = time.monotonic_ns() // 1_000_000
-            result = func(*args, **kwargs)
-            end_ms = time.monotonic_ns() // 1_000_000
-            execution_time_ms = end_ms - start_ms
-
-            # 3. Capture output
-            output_str = _to_str(result)
-
-            # 4. Build trace and generate receipt (without halt_event yet)
-            trace_data = _build_trace_data(
-                trace_id=trace_id,
-                query=resolved["query"],
-                context=resolved["context"],
-                output=output_str,
-            )
-
-            enforcement_decision = "PASSED"
-
-            extensions = {
-                "middleware": {
-                    "decorator": "@sanna_observe",
-                    "on_violation": on_violation,
-                    "enforcement_decision": enforcement_decision,  # updated below
-                    "function_name": func.__name__,
-                    "execution_time_ms": execution_time_ms,
-                }
-            }
-
-            # First pass: generate receipt without halt_event to determine enforcement
-            receipt = _generate_receipt_with_checks(
-                trace_data, checks, extensions=extensions,
-                constitution=constitution,
-                constitution_ref_override=constitution_ref_override,
-            )
-
-            # 5. Enforcement decision
-            halt_event_obj = None
-            if receipt["coherence_status"] != "PASS":
-                if on_violation == "halt" and _should_halt(receipt, halt_on):
-                    enforcement_decision = "HALTED"
-                    failed_check_ids = [
-                        c["check_id"] for c in receipt["checks"]
-                        if not c["passed"] and c["severity"] in halt_on
-                    ]
-                    halt_event_obj = HaltEvent(
-                        halted=True,
-                        reason=f"Coherence check failed: {', '.join(failed_check_ids)}",
-                        failed_checks=failed_check_ids,
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        enforcement_mode=on_violation,
-                    )
-                elif on_violation == "warn":
-                    enforcement_decision = "WARNED"
-                else:
-                    enforcement_decision = "LOGGED"
-            else:
-                enforcement_decision = "PASSED"
-
-            # If we created a halt_event, regenerate receipt with it included
-            if halt_event_obj is not None:
-                receipt = _generate_receipt_with_checks(
-                    trace_data, checks, extensions=extensions,
-                    constitution=constitution,
-                    halt_event=halt_event_obj,
-                    constitution_ref_override=constitution_ref_override,
-                )
-
-            # Update the extensions with final decision
-            receipt["extensions"]["middleware"]["enforcement_decision"] = enforcement_decision
-
-            # 6. Write receipt to disk if configured
-            if receipt_dir is not None:
-                _write_receipt(receipt, receipt_dir)
-
-            # 7. Apply policy
-            if enforcement_decision == "HALTED":
-                failed_checks = [
-                    c for c in receipt["checks"]
-                    if not c["passed"] and c["severity"] in halt_on
-                ]
-                names = ", ".join(f"{c['check_id']} ({c['name']})" for c in failed_checks)
-                raise SannaHaltError(
-                    f"Sanna coherence check failed: {names}",
-                    receipt=receipt,
-                )
-
-            if enforcement_decision == "WARNED":
-                failed_checks = [c for c in receipt["checks"] if not c["passed"]]
-                names = ", ".join(f"{c['check_id']} ({c['name']})" for c in failed_checks)
-                warnings.warn(
-                    f"Sanna coherence warning: {names} — status={receipt['coherence_status']}",
-                    stacklevel=2,
-                )
-
-            return SannaResult(output=result, receipt=receipt)
-
-        return wrapper
-
-    # Support both @sanna_observe and @sanna_observe(...)
-    if _func is not None:
-        return decorator(_func)
-    return decorator
+    return receipt_dict
 
 
 # =============================================================================
@@ -527,3 +396,219 @@ def _write_receipt(receipt: dict, receipt_dir: str) -> Path:
 
     logger.debug("Receipt written to %s", filepath)
     return filepath
+
+
+# =============================================================================
+# THE DECORATOR
+# =============================================================================
+
+def sanna_observe(
+    _func=None,
+    *,
+    receipt_dir: Optional[str] = None,
+    context_param: Optional[str] = None,
+    query_param: Optional[str] = None,
+    constitution_path: Optional[str] = None,
+    # Legacy parameters — ignored when constitution has invariants
+    on_violation: str = "halt",
+    checks: Optional[List[str]] = None,
+    halt_on: Optional[List[str]] = None,
+    constitution: Optional[ConstitutionProvenance] = None,
+):
+    """
+    Decorator that wraps an agent function with Sanna coherence checks.
+
+    v0.6.0: The constitution is the control plane. When a constitution with
+    invariants is provided, the invariants drive which checks run and at what
+    enforcement level. Each check enforces independently based on its invariant.
+
+    Args:
+        constitution_path: Path to a Sanna constitution YAML/JSON file.
+            This is the primary way to configure checks. The constitution's
+            invariants drive which checks run and how they enforce.
+        receipt_dir: Directory to write receipt JSON. None to skip.
+        context_param: Explicit name of the context parameter.
+        query_param: Explicit name of the query parameter.
+        on_violation: Legacy. Used when no constitution invariants are present.
+        checks: Legacy. Used when no constitution invariants are present.
+        halt_on: Legacy. Used when no constitution invariants are present.
+        constitution: Legacy ConstitutionProvenance for governance tracking.
+
+    Returns:
+        SannaResult wrapping the function output and receipt, or raises
+        SannaHaltError if policy dictates halt.
+    """
+    if on_violation not in ("halt", "warn", "log"):
+        raise ValueError(f"on_violation must be 'halt', 'warn', or 'log', got {on_violation!r}")
+
+    # Decoration-time constitution loading
+    loaded_constitution = None
+    constitution_ref_override = None
+    check_configs = None
+    custom_records = None
+
+    if constitution_path is not None:
+        from .constitution import load_constitution as _load_constitution, sign_constitution, constitution_to_receipt_ref
+        from .enforcement import configure_checks
+
+        loaded_constitution = _load_constitution(constitution_path)
+        if not loaded_constitution.document_hash:
+            loaded_constitution = sign_constitution(loaded_constitution)
+        constitution_ref_override = constitution_to_receipt_ref(loaded_constitution)
+
+        # Configure checks from invariants
+        check_configs, custom_records = configure_checks(loaded_constitution)
+
+        logger.info(
+            "Constitution loaded from %s (hash=%s, invariants=%d, checks=%d)",
+            constitution_path,
+            loaded_constitution.document_hash[:16],
+            len(loaded_constitution.invariants),
+            len(check_configs),
+        )
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            trace_id = f"sanna-{uuid.uuid4().hex[:12]}"
+
+            # 1. Capture inputs
+            resolved = _resolve_inputs(func, args, kwargs, context_param, query_param)
+
+            # 2. Execute the wrapped function
+            start_ms = time.monotonic_ns() // 1_000_000
+            result = func(*args, **kwargs)
+            end_ms = time.monotonic_ns() // 1_000_000
+            execution_time_ms = end_ms - start_ms
+
+            # 3. Capture output
+            output_str = _to_str(result)
+
+            # 4. Build trace
+            trace_data = _build_trace_data(
+                trace_id=trace_id,
+                query=resolved["query"],
+                context=resolved["context"],
+                output=output_str,
+            )
+
+            enforcement_decision = "PASSED"
+
+            extensions = {
+                "middleware": {
+                    "decorator": "@sanna_observe",
+                    "on_violation": on_violation,
+                    "enforcement_decision": enforcement_decision,
+                    "function_name": func.__name__,
+                    "execution_time_ms": execution_time_ms,
+                }
+            }
+
+            # 5. Generate receipt — constitution-driven or legacy
+            if check_configs is not None:
+                # Constitution-driven: invariants control everything
+                constitution_version = loaded_constitution.schema_version if loaded_constitution else ""
+
+                if not check_configs and not custom_records:
+                    # No invariants defined — no checks run
+                    receipt = _generate_no_invariants_receipt(
+                        trace_data,
+                        constitution_ref=constitution_ref_override,
+                        extensions=extensions,
+                    )
+                else:
+                    receipt = _generate_constitution_receipt(
+                        trace_data,
+                        check_configs=check_configs,
+                        custom_records=custom_records,
+                        constitution_ref=constitution_ref_override,
+                        constitution_version=constitution_version,
+                        extensions=extensions,
+                    )
+
+                # Per-check enforcement: determine what to do
+                halt_checks = []
+                warn_checks = []
+                log_checks = []
+
+                for check in receipt.get("checks", []):
+                    if check.get("status") == "NOT_CHECKED":
+                        continue
+                    if not check.get("passed"):
+                        level = check.get("enforcement_level", "log")
+                        if level == "halt":
+                            halt_checks.append(check)
+                        elif level == "warn":
+                            warn_checks.append(check)
+                        else:
+                            log_checks.append(check)
+
+                # Create halt event if any halt-level checks failed
+                if halt_checks:
+                    enforcement_decision = "HALTED"
+                    failed_ids = [c["check_id"] for c in halt_checks]
+                    halt_event_obj = HaltEvent(
+                        halted=True,
+                        reason=f"Coherence check failed: {', '.join(failed_ids)}",
+                        failed_checks=failed_ids,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        enforcement_mode="halt",
+                    )
+                    # Regenerate receipt with halt event
+                    receipt = _generate_constitution_receipt(
+                        trace_data,
+                        check_configs=check_configs,
+                        custom_records=custom_records,
+                        constitution_ref=constitution_ref_override,
+                        constitution_version=constitution_version,
+                        extensions=extensions,
+                        halt_event=halt_event_obj,
+                    )
+                elif warn_checks:
+                    enforcement_decision = "WARNED"
+                elif log_checks:
+                    enforcement_decision = "LOGGED"
+                else:
+                    enforcement_decision = "PASSED"
+
+            else:
+                # No constitution path — run with no checks, document in receipt
+                receipt = _generate_no_invariants_receipt(
+                    trace_data,
+                    constitution_ref=asdict(constitution) if constitution else None,
+                    extensions=extensions,
+                )
+                enforcement_decision = "PASSED"
+
+            # Update extensions with final decision
+            receipt["extensions"]["middleware"]["enforcement_decision"] = enforcement_decision
+
+            # 6. Write receipt to disk if configured
+            if receipt_dir is not None:
+                _write_receipt(receipt, receipt_dir)
+
+            # 7. Apply enforcement
+            if enforcement_decision == "HALTED":
+                failed = [c for c in receipt["checks"] if not c.get("passed") and c.get("enforcement_level") == "halt"]
+                names = ", ".join(f"{c['check_id']} ({c['name']})" for c in failed)
+                raise SannaHaltError(
+                    f"Sanna coherence check failed: {names}",
+                    receipt=receipt,
+                )
+
+            if enforcement_decision == "WARNED":
+                warned = [c for c in receipt["checks"] if not c.get("passed") and c.get("enforcement_level") == "warn"]
+                names = ", ".join(f"{c['check_id']} ({c['name']})" for c in warned)
+                warnings.warn(
+                    f"Sanna coherence warning: {names} — status={receipt['coherence_status']}",
+                    stacklevel=2,
+                )
+
+            return SannaResult(output=result, receipt=receipt)
+
+        return wrapper
+
+    # Support both @sanna_observe and @sanna_observe(...)
+    if _func is not None:
+        return decorator(_func)
+    return decorator

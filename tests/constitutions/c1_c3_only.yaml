@@ -1,0 +1,31 @@
+# Test constitution — only C1 and C3 checks
+sanna_constitution: "1.0.0"
+
+identity:
+  agent_name: "test-c1-c3"
+  domain: "testing"
+  description: "Only INV_NO_FABRICATION and INV_NO_FALSE_CERTAINTY"
+
+provenance:
+  authored_by: "tester@test.com"
+  approved_by:
+    - "approver@test.com"
+  approval_date: "2026-01-01"
+  approval_method: "test-approval"
+
+invariants:
+  - id: "INV_NO_FABRICATION"
+    rule: "Do not claim facts absent from provided sources."
+    enforcement: "halt"
+  - id: "INV_NO_FALSE_CERTAINTY"
+    rule: "Do not express certainty exceeding evidence strength."
+    enforcement: "log"
+
+boundaries:
+  - id: "B001"
+    description: "Test boundary"
+    category: "scope"
+    severity: "medium"
+
+document_hash: null
+signed_at: null
