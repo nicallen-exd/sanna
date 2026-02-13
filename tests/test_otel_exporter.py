@@ -10,7 +10,6 @@ Covers:
 """
 
 import hashlib
-import json
 
 import pytest
 
@@ -477,3 +476,98 @@ class TestHelpers:
     def test_check_status_not_checked(self):
         checks = [{"check_id": "INV_CUSTOM", "passed": True, "status": "NOT_CHECKED"}]
         assert _check_status(checks, "INV_CUSTOM") == "not_checked"
+
+
+# =============================================================================
+# TEST: content_hash uses Sanna canonical JSON
+# =============================================================================
+
+class TestContentHashCanonical:
+    def test_non_ascii_content_matches_canonical(self):
+        """content_hash must use canonical_json_bytes, not json.dumps."""
+        from sanna.hashing import canonical_json_bytes
+
+        receipt = _pass_receipt(
+            inputs={"query": "What is café?", "context": "Le café ☕ est délicieux 🇫🇷"},
+            outputs={"response": "Café means coffee — très bon!"},
+        )
+        expected = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+        assert _content_hash(receipt) == expected
+
+    def test_unicode_emoji_receipt(self):
+        """Receipts with emoji produce correct canonical hash."""
+        from sanna.hashing import canonical_json_bytes
+
+        receipt = _pass_receipt(
+            inputs={"query": "🤖💡", "context": "日本語テスト"},
+            outputs={"response": "Ответ на русском"},
+        )
+        expected = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+        assert _content_hash(receipt) == expected
+
+
+# =============================================================================
+# TEST: namespaced check IDs map correctly to C1-C5
+# =============================================================================
+
+class TestNamespacedCheckIDs:
+    def test_namespaced_check_ids_populate_attributes(self, tracer_and_exporter):
+        """Constitution-driven receipts use namespaced check_id values."""
+        tracer, exporter, provider = tracer_and_exporter
+        receipt = _pass_receipt(checks=[
+            {"check_id": "sanna.context_contradiction", "check_impl": "sanna.context_contradiction", "name": "C1", "passed": True, "severity": "info", "evidence": None},
+            {"check_id": "sanna.unmarked_inference", "check_impl": "sanna.unmarked_inference", "name": "C2", "passed": False, "severity": "warning", "evidence": "unmarked"},
+            {"check_id": "sanna.false_certainty", "check_impl": "sanna.false_certainty", "name": "C3", "passed": True, "severity": "info", "evidence": None},
+            {"check_id": "sanna.conflict_collapse", "check_impl": "sanna.conflict_collapse", "name": "C4", "passed": True, "severity": "info", "evidence": None},
+            {"check_id": "sanna.premature_compression", "check_impl": "sanna.premature_compression", "name": "C5", "passed": False, "severity": "warning", "evidence": "compressed"},
+        ])
+
+        receipt_to_span(receipt, tracer)
+        provider.force_flush()
+
+        span = exporter.get_finished_spans()[0]
+        attrs = dict(span.attributes)
+        assert attrs["sanna.check.c1.status"] == "pass"
+        assert attrs["sanna.check.c2.status"] == "fail"
+        assert attrs["sanna.check.c3.status"] == "pass"
+        assert attrs["sanna.check.c4.status"] == "pass"
+        assert attrs["sanna.check.c5.status"] == "fail"
+
+    def test_mixed_legacy_and_namespaced_ids(self, tracer_and_exporter):
+        """Receipt mixing legacy C1/C2 and namespaced IDs for C3-C5."""
+        tracer, exporter, provider = tracer_and_exporter
+        receipt = _pass_receipt(checks=[
+            {"check_id": "C1", "name": "Context Contradiction", "passed": True, "severity": "info", "evidence": None},
+            {"check_id": "C2", "name": "Mark Inferences", "passed": True, "severity": "info", "evidence": None},
+            {"check_id": "sanna.false_certainty", "check_impl": "sanna.false_certainty", "name": "C3", "passed": False, "severity": "critical", "evidence": "overcertain"},
+            {"check_id": "sanna.conflict_collapse", "check_impl": "sanna.conflict_collapse", "name": "C4", "passed": True, "severity": "info", "evidence": None},
+            {"check_id": "sanna.premature_compression", "check_impl": "sanna.premature_compression", "name": "C5", "passed": True, "severity": "info", "evidence": None},
+        ])
+
+        receipt_to_span(receipt, tracer)
+        provider.force_flush()
+
+        span = exporter.get_finished_spans()[0]
+        attrs = dict(span.attributes)
+        assert attrs["sanna.check.c1.status"] == "pass"
+        assert attrs["sanna.check.c2.status"] == "pass"
+        assert attrs["sanna.check.c3.status"] == "fail"
+        assert attrs["sanna.check.c4.status"] == "pass"
+        assert attrs["sanna.check.c5.status"] == "pass"
+
+    def test_check_impl_field_used_for_matching(self):
+        """check_impl field resolves namespaced ID even if check_id differs."""
+        checks = [
+            {"check_id": "INV_NO_FABRICATION", "check_impl": "sanna.context_contradiction", "passed": True},
+        ]
+        assert _check_status(checks, "C1") == "pass"
+
+    def test_namespaced_check_status_helper(self):
+        """_check_status handles namespaced IDs directly."""
+        checks = [
+            {"check_id": "sanna.context_contradiction", "passed": True},
+            {"check_id": "sanna.unmarked_inference", "passed": False},
+        ]
+        assert _check_status(checks, "C1") == "pass"
+        assert _check_status(checks, "C2") == "fail"
+        assert _check_status(checks, "C3") == "absent"

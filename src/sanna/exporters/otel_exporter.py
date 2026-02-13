@@ -19,9 +19,10 @@ Requires ``pip install sanna[otel]``.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from typing import Optional, Sequence
+
+from sanna.hashing import canonical_json_bytes
 
 try:
     from opentelemetry import trace
@@ -44,22 +45,51 @@ if not HAS_OTEL:
 # HELPERS
 # =============================================================================
 
+NAMESPACED_TO_LEGACY = {
+    "sanna.context_contradiction": "C1",
+    "sanna.unmarked_inference": "C2",
+    "sanna.false_certainty": "C3",
+    "sanna.conflict_collapse": "C4",
+    "sanna.premature_compression": "C5",
+}
+
+
 def _content_hash(receipt: dict) -> str:
-    """SHA-256 of canonical JSON of the receipt."""
-    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    """SHA-256 of Sanna canonical JSON of the receipt."""
+    return hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
 
 
 def _check_status(checks: list, check_id: str) -> str:
     """Extract status string for a specific check ID.
 
-    Returns "pass", "fail", or "absent".
+    Accepts legacy IDs ("C1") and namespaced IDs
+    ("sanna.context_contradiction").  Also checks the ``check_impl``
+    field for a namespaced match.
+
+    Returns "pass", "fail", "not_checked", or "absent".
     """
     for check in checks:
-        if check.get("check_id") == check_id:
+        cid = check.get("check_id", "")
+        impl = check.get("check_impl", "")
+
+        # Direct legacy match (e.g. check_id == "C1")
+        if cid == check_id:
             if check.get("status") == "NOT_CHECKED":
                 return "not_checked"
             return "pass" if check.get("passed") else "fail"
+
+        # Namespaced check_id → legacy match
+        if cid in NAMESPACED_TO_LEGACY and NAMESPACED_TO_LEGACY[cid] == check_id:
+            if check.get("status") == "NOT_CHECKED":
+                return "not_checked"
+            return "pass" if check.get("passed") else "fail"
+
+        # check_impl field → legacy match
+        if impl in NAMESPACED_TO_LEGACY and NAMESPACED_TO_LEGACY[impl] == check_id:
+            if check.get("status") == "NOT_CHECKED":
+                return "not_checked"
+            return "pass" if check.get("passed") else "fail"
+
     return "absent"
 
 

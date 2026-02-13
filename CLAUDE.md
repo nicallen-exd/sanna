@@ -4,9 +4,9 @@
 Trust infrastructure for AI agents. Checks reasoning during execution, halts when constraints are violated, generates portable cryptographic receipts proving governance was enforced. Constitution enforcement is the product. MCP is the distribution channel.
 
 ## Current State
-- **Version:** v0.7.0 on PyPI (703 tests, 10 xfailed, 0 failures)
+- **Version:** v0.7.1 on PyPI (731 tests, 10 xfailed, 0 failures)
 - **CI:** Green across Python 3.10, 3.11, 3.12
-- **Package:** `pip install sanna` / `pip install sanna[mcp]`
+- **Package:** `pip install sanna` / `pip install sanna[mcp]` / `pip install sanna[otel]`
 
 ## Architecture
 
@@ -48,32 +48,14 @@ Trust infrastructure for AI agents. Checks reasoning during execution, halts whe
 - Pre-publish fixes: PEP 621 license, root schema sync, httpx import guard
 - CI fixes: pytest.importorskip for mcp and httpx tests, --verify-only without --private-key
 
-## Active Build: v0.7.1
-
-### OTel bridge (primary deliverable)
-- **New file:** `src/sanna/exporters/otel_exporter.py`
-- **Optional dependency:** `sanna[otel]` → `opentelemetry-api>=1.20.0`, `opentelemetry-sdk>=1.20.0`
-- **Class:** SannaOTelExporter (implements SpanExporter)
-- **Design principle:** Spans carry pointer + integrity hash, NOT full receipt JSON
-  - `sanna.artifact.uri` → where the receipt is stored
-  - `sanna.artifact.content_hash` → SHA-256 of receipt JSON
-- **Semantic conventions namespace:** `sanna.*`
-  - `sanna.receipt.id`, `sanna.coherence_status`, `sanna.enforcement_decision`
-  - `sanna.constitution.policy_hash`, `sanna.constitution.version`
-  - `sanna.evaluation_coverage.pct`
-  - `sanna.check.c1.status` through `sanna.check.c5.status`
-  - `sanna.authority.decision`, `sanna.escalation.triggered`, `sanna.source_trust.flags`
-- **Span:** name=`sanna.governance.evaluation`, kind=INTERNAL, status=OK/ERROR
-- **Integration:** Works with BatchSpanProcessor and any OTel backend
-
-### Deferred hardening items (also v0.7.1)
-1. **unclassified tier context_used inconsistency** — middleware.py emits context_used=True for unclassified sources but C1 ignores them. Align context_used with actual C1 behavior.
-2. **policy_hash canonicalization** — compute_constitution_hash() uses ensure_ascii=True, golden vectors imply ensure_ascii=False. Document the distinction or align.
-3. **Receipt extensions fingerprint semantics** — sanna_observe() always adds execution_time_ms to extensions, making fingerprints execution-specific. Document or restructure.
-4. **action_params size guard** — MCP server has no size limit on action_params dict.
+## What Was Built in v0.7.1
+- OTel bridge: `src/sanna/exporters/otel_exporter.py` — SannaOTelExporter (pointer + integrity hash, NOT full receipt in spans)
+  - Optional dep: `sanna[otel]` → opentelemetry-api/sdk >=1.20.0
+  - 15 `sanna.*` span attributes, span name `sanna.governance.evaluation`
+- Deferred hardening: unclassified tier context_used fix, action_params 100KB size guard, policy_hash/extensions fingerprint documentation
 
 ## Testing Rules
-- ALL 703 existing tests must pass after any change
+- ALL 731 existing tests must pass after any change
 - Optional dependency tests MUST use `pytest.importorskip()` — CI does not install extras
 - Golden receipts: NEVER use `--update-golden-receipts` unless intentionally changing receipt format
 - Float values in golden receipts: use integers to avoid hash instability
