@@ -201,6 +201,14 @@ class TestZipBombSlipProtection:
 # 2. MCP SERVER CRASH PROTECTION
 # =============================================================================
 
+try:
+    import mcp as _mcp  # noqa: F401
+    _HAS_MCP = True
+except ImportError:
+    _HAS_MCP = False
+
+
+@pytest.mark.skipif(not _HAS_MCP, reason="mcp extra not installed")
 class TestMCPServerCrashProtection:
     def test_verify_receipt_oversized_input(self):
         from sanna.mcp.server import sanna_verify_receipt, MAX_RECEIPT_JSON_SIZE

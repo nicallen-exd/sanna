@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("mcp", reason="mcp extra not installed")
+
 from sanna.mcp.server import (
     sanna_verify_receipt,
     sanna_generate_receipt,
