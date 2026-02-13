@@ -78,6 +78,13 @@ from .bundle import (
     BundleVerificationResult,
     BundleCheck,
 )
+from .store import ReceiptStore
+from .drift import (
+    DriftAnalyzer,
+    DriftReport,
+    AgentDriftSummary,
+    CheckDriftDetail,
+)
 
 __all__ = [
     "__version__",
@@ -149,4 +156,9 @@ __all__ = [
     "verify_bundle",
     "BundleVerificationResult",
     "BundleCheck",
+    "ReceiptStore",
+    "DriftAnalyzer",
+    "DriftReport",
+    "AgentDriftSummary",
+    "CheckDriftDetail",
 ]

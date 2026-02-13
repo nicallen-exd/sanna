@@ -44,6 +44,7 @@ sanna-verify-constitution = "sanna.cli:main_verify_constitution"
 sanna-mcp = "sanna.mcp.__main__:main"
 sanna-create-bundle = "sanna.cli:main_create_bundle"
 sanna-verify-bundle = "sanna.cli:main_verify_bundle"
+sanna-drift-report = "sanna.cli:main_drift_report"
 # Legacy aliases
 c3m-receipt = "sanna.cli:main_generate"
 c3m-verify = "sanna.cli:main_verify"

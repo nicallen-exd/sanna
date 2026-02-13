@@ -659,6 +659,79 @@ def main_verify_bundle():
         return 1
 
 
+# =============================================================================
+# DRIFT REPORT CLI
+# =============================================================================
+
+def main_drift_report():
+    """Entry point for sanna-drift-report command."""
+    parser = argparse.ArgumentParser(
+        description="Governance drift report over stored Sanna receipts"
+    )
+    parser.add_argument("--db", default=".sanna/receipts.db",
+                       help="Path to receipt store DB (default: .sanna/receipts.db)")
+    parser.add_argument("--window", type=int, action="append", dest="windows",
+                       help="Analysis window in days (repeatable, default: 30)")
+    parser.add_argument("--agent", action="append", dest="agents",
+                       help="Filter to specific agent ID (repeatable)")
+    parser.add_argument("--threshold", type=float, default=0.15,
+                       help="Failure-rate threshold 0–1 (default: 0.15)")
+    parser.add_argument("--projection-days", type=int, default=90,
+                       help="Projection horizon in days (default: 90)")
+    parser.add_argument("--json", action="store_true",
+                       help="Machine-readable JSON output")
+    parser.add_argument("--version", action="version", version=f"sanna-drift-report {TOOL_VERSION}")
+
+    args = parser.parse_args()
+
+    from .store import ReceiptStore
+    from .drift import DriftAnalyzer, format_drift_report
+
+    if not Path(args.db).exists():
+        print(f"Error: Receipt store not found: {args.db}", file=sys.stderr)
+        print("Run agents with ReceiptStore to populate it first.", file=sys.stderr)
+        return 1
+
+    store = ReceiptStore(args.db)
+    analyzer = DriftAnalyzer(store)
+
+    windows = args.windows or [30]
+    agent_ids = args.agents or [None]
+
+    reports = []
+    for agent_id in agent_ids:
+        if len(windows) > 1:
+            batch = analyzer.analyze_multi(
+                windows=windows,
+                agent_id=agent_id,
+                threshold=args.threshold,
+                projection_days=args.projection_days,
+            )
+            reports.extend(batch)
+        else:
+            report = analyzer.analyze(
+                window_days=windows[0],
+                agent_id=agent_id,
+                threshold=args.threshold,
+                projection_days=args.projection_days,
+            )
+            reports.append(report)
+
+    if args.json:
+        from dataclasses import asdict
+        print(json.dumps([asdict(r) for r in reports], indent=2))
+    else:
+        for report in reports:
+            print(format_drift_report(report))
+
+    store.close()
+
+    # Exit code: 1 if any fleet status is CRITICAL
+    if any(r.fleet_status == "CRITICAL" for r in reports):
+        return 1
+    return 0
+
+
 # Legacy aliases
 main_receipt = main_generate
 

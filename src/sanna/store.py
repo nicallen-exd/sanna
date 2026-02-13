@@ -1,0 +1,275 @@
+"""
+Sanna ReceiptStore — SQLite persistence for reasoning receipts.
+
+Stores receipts with indexed metadata for fleet-level governance queries.
+Uses Python's built-in sqlite3 module with no external dependencies.
+"""
+
+import json
+import os
+import sqlite3
+import threading
+import uuid
+from datetime import datetime
+from typing import Any, Optional
+
+
+_SCHEMA_VERSION = 1
+
+_CREATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS receipts (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT,
+    constitution_id TEXT,
+    trace_id        TEXT,
+    timestamp       TEXT,
+    overall_status  TEXT,
+    halt_event      INTEGER DEFAULT 0,
+    check_statuses  TEXT,
+    receipt_json    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipts_agent_id ON receipts(agent_id);
+CREATE INDEX IF NOT EXISTS idx_receipts_constitution_id ON receipts(constitution_id);
+CREATE INDEX IF NOT EXISTS idx_receipts_trace_id ON receipts(trace_id);
+CREATE INDEX IF NOT EXISTS idx_receipts_timestamp ON receipts(timestamp);
+CREATE INDEX IF NOT EXISTS idx_receipts_overall_status ON receipts(overall_status);
+CREATE INDEX IF NOT EXISTS idx_receipts_halt_event ON receipts(halt_event);
+"""
+
+
+def _extract_agent_id(receipt: dict) -> Optional[str]:
+    """Extract agent_id from receipt's constitution_ref.document_id.
+
+    The document_id format is "{agent_name}/{version}". Returns the agent_name
+    portion, or None if no constitution_ref is present.
+    """
+    ref = receipt.get("constitution_ref")
+    if not ref or not isinstance(ref, dict):
+        return None
+    doc_id = ref.get("document_id")
+    if not doc_id or not isinstance(doc_id, str):
+        return None
+    parts = doc_id.split("/", 1)
+    return parts[0] if parts[0] else None
+
+
+def _extract_constitution_id(receipt: dict) -> Optional[str]:
+    """Extract constitution_id from receipt's constitution_ref.document_id."""
+    ref = receipt.get("constitution_ref")
+    if not ref or not isinstance(ref, dict):
+        return None
+    doc_id = ref.get("document_id")
+    if doc_id and isinstance(doc_id, str):
+        return doc_id
+    return None
+
+
+def _extract_check_statuses(receipt: dict) -> str:
+    """Extract check statuses as a JSON array of {check_id, status} dicts."""
+    checks = receipt.get("checks")
+    if not checks or not isinstance(checks, list):
+        return "[]"
+    statuses = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        check_id = check.get("check_id", "unknown")
+        explicit_status = check.get("status")
+        if explicit_status:
+            status = explicit_status
+        elif check.get("passed", False):
+            status = "PASS"
+        else:
+            status = "FAIL"
+        statuses.append({"check_id": check_id, "status": status})
+    return json.dumps(statuses)
+
+
+def _is_halt(receipt: dict) -> int:
+    """Determine whether receipt represents a halt event. Returns 0 or 1."""
+    halt = receipt.get("halt_event")
+    if halt and isinstance(halt, dict) and halt.get("halted"):
+        return 1
+    return 0
+
+
+class ReceiptStore:
+    """SQLite-backed persistence for Sanna reasoning receipts.
+
+    Usage::
+
+        store = ReceiptStore()              # default: .sanna/receipts.db
+        store = ReceiptStore("/tmp/my.db")  # custom path
+        receipt_id = store.save(receipt)
+        results = store.query(agent_id="my-agent", status="FAIL")
+        store.close()
+
+    Also works as a context manager::
+
+        with ReceiptStore() as store:
+            store.save(receipt)
+    """
+
+    def __init__(self, db_path: str = ".sanna/receipts.db"):
+        self._db_path = db_path
+        self._lock = threading.Lock()
+        self._closed = False
+
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.executescript(_CREATE_SCHEMA)
+            row = cursor.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+            if row is None:
+                cursor.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (_SCHEMA_VERSION,),
+                )
+            self._conn.commit()
+
+    def save(self, receipt: dict) -> str:
+        """Store a receipt and return its ID."""
+        receipt_id = receipt.get("receipt_id")
+        if not receipt_id or not isinstance(receipt_id, str):
+            receipt_id = uuid.uuid4().hex[:16]
+
+        agent_id = _extract_agent_id(receipt)
+        constitution_id = _extract_constitution_id(receipt)
+        trace_id = receipt.get("trace_id")
+        timestamp = receipt.get("timestamp")
+        overall_status = receipt.get("coherence_status")
+        halt = _is_halt(receipt)
+        check_statuses = _extract_check_statuses(receipt)
+        receipt_json = json.dumps(receipt)
+
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO receipts
+                   (id, agent_id, constitution_id, trace_id, timestamp,
+                    overall_status, halt_event, check_statuses, receipt_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    receipt_id,
+                    agent_id,
+                    constitution_id,
+                    trace_id if isinstance(trace_id, str) else None,
+                    timestamp if isinstance(timestamp, str) else None,
+                    overall_status if isinstance(overall_status, str) else None,
+                    halt,
+                    check_statuses,
+                    receipt_json,
+                ),
+            )
+            self._conn.commit()
+
+        return receipt_id
+
+    def _build_where(self, filters: dict) -> tuple[str, list]:
+        """Build WHERE clause and params from filter dict."""
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if "agent_id" in filters:
+            clauses.append("agent_id = ?")
+            params.append(filters["agent_id"])
+
+        if "constitution_id" in filters:
+            clauses.append("constitution_id = ?")
+            params.append(filters["constitution_id"])
+
+        if "trace_id" in filters:
+            clauses.append("trace_id = ?")
+            params.append(filters["trace_id"])
+
+        if "status" in filters:
+            clauses.append("overall_status = ?")
+            params.append(filters["status"])
+
+        if "halt_event" in filters and filters["halt_event"]:
+            clauses.append("halt_event = 1")
+
+        if "check_status" in filters:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(check_statuses) "
+                "WHERE json_extract(value, '$.status') = ?)"
+            )
+            params.append(filters["check_status"])
+
+        if "since" in filters:
+            since = filters["since"]
+            if isinstance(since, datetime):
+                clauses.append("timestamp >= ?")
+                params.append(since.isoformat())
+            elif isinstance(since, str):
+                clauses.append("timestamp >= ?")
+                params.append(since)
+
+        if "until" in filters:
+            until = filters["until"]
+            if isinstance(until, datetime):
+                clauses.append("timestamp <= ?")
+                params.append(until.isoformat())
+            elif isinstance(until, str):
+                clauses.append("timestamp <= ?")
+                params.append(until)
+
+        where = " AND ".join(clauses) if clauses else "1=1"
+        return where, params
+
+    def query(self, **filters) -> list[dict]:
+        """Query receipts with combinable filters.
+
+        Keyword Args:
+            agent_id, constitution_id, trace_id, status, halt_event,
+            check_status, since, until.
+
+        Returns list of full receipt dicts, ordered by timestamp descending.
+        """
+        where, params = self._build_where(filters)
+        sql = f"SELECT receipt_json FROM receipts WHERE {where} ORDER BY timestamp DESC"
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+
+        return [json.loads(row["receipt_json"]) for row in rows]
+
+    def count(self, **filters) -> int:
+        """Count receipts matching the given filters."""
+        where, params = self._build_where(filters)
+        sql = f"SELECT COUNT(*) as cnt FROM receipts WHERE {where}"
+
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+
+        return row["cnt"]
+
+    def close(self) -> None:
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
