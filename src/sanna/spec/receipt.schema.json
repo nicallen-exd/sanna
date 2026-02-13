@@ -33,13 +33,13 @@
       "type": "string",
       "description": "Tool version that generated this receipt",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "examples": ["0.6.0"]
+      "examples": ["0.6.1"]
     },
     "checks_version": {
       "type": "string",
       "description": "Version of check logic (increment when check behavior changes)",
       "pattern": "^[0-9]+$",
-      "examples": ["2"]
+      "examples": ["3"]
     },
     "receipt_id": {
       "type": "string",
@@ -141,22 +141,50 @@
     "coherence_status": {
       "type": "string",
       "description": "Overall status derived from check results",
-      "enum": ["PASS", "WARN", "FAIL"]
+      "enum": ["PASS", "WARN", "FAIL", "PARTIAL"]
+    },
+    "evaluation_coverage": {
+      "type": ["object", "null"],
+      "description": "Coverage metrics for invariant evaluation",
+      "properties": {
+        "total_invariants": {
+          "type": "integer",
+          "description": "Total number of invariants in the constitution",
+          "minimum": 0
+        },
+        "evaluated": {
+          "type": "integer",
+          "description": "Number of invariants with built-in checks",
+          "minimum": 0
+        },
+        "not_checked": {
+          "type": "integer",
+          "description": "Number of invariants without evaluators (NOT_CHECKED)",
+          "minimum": 0
+        },
+        "coverage_basis_points": {
+          "type": "integer",
+          "description": "Proportion of invariants evaluated, in basis points (0-10000, where 10000 = 100%)",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      },
+      "additionalProperties": false
     },
     "constitution_ref": {
       "type": ["object", "null"],
       "description": "Provenance of the constitution/policy document that defined check boundaries",
-      "required": ["document_id", "document_hash"],
+      "required": ["document_id", "policy_hash"],
       "properties": {
         "document_id": {
           "type": "string",
           "description": "Identifier for the constitution document (e.g., 'agent-name/0.1.0')",
           "minLength": 1
         },
-        "document_hash": {
+        "policy_hash": {
           "type": "string",
-          "description": "SHA-256 hash of the constitution content (16-char legacy or 64-char full)",
-          "pattern": "^[a-f0-9]{16,64}$"
+          "description": "SHA-256 hash of the constitution policy content (16 or 64 hex chars)",
+          "pattern": "^[a-f0-9]{16}([a-f0-9]{48})?$"
         },
         "version": {
           "type": ["string", "null"],
@@ -190,6 +218,28 @@
         "approval_method": {
           "type": ["string", "null"],
           "description": "How approval was obtained (e.g., 'github-pr-review', 'manual-sign-off')"
+        },
+        "signature": {
+          "type": ["string", "null"],
+          "description": "Base64-encoded Ed25519 signature of the constitution"
+        },
+        "key_id": {
+          "type": ["string", "null"],
+          "description": "Full SHA-256 fingerprint of the signing public key (64 hex chars)",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "signed_by": {
+          "type": ["string", "null"],
+          "description": "Identity of the constitution signer"
+        },
+        "signed_at": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 timestamp when the constitution was signed"
+        },
+        "scheme": {
+          "type": ["string", "null"],
+          "description": "Signature scheme identifier",
+          "enum": ["constitution_sig_v1", null]
         }
       },
       "additionalProperties": false
@@ -227,6 +277,40 @@
       },
       "additionalProperties": false
     },
+    "receipt_signature": {
+      "type": ["object", "null"],
+      "description": "Ed25519 cryptographic signature of the receipt",
+      "properties": {
+        "signature": {
+          "type": "string",
+          "description": "Base64-encoded Ed25519 signature"
+        },
+        "key_id": {
+          "type": "string",
+          "description": "Full SHA-256 fingerprint of the signing public key (64 hex chars)",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "signed_by": {
+          "type": "string",
+          "description": "Identity of the signer"
+        },
+        "signed_at": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when the receipt was signed"
+        },
+        "scheme": {
+          "type": "string",
+          "description": "Signature scheme identifier",
+          "enum": ["receipt_sig_v1"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "enforcement_decision": {
+      "type": ["string", "null"],
+      "description": "Top-level enforcement decision",
+      "enum": ["PASSED", "WARNED", "HALTED", "LOGGED", null]
+    },
     "extensions": {
       "type": "object",
       "description": "Optional vendor-specific metadata. Ignored by verifier but preserved in receipt.",
@@ -242,8 +326,8 @@
       "properties": {
         "check_id": {
           "type": "string",
-          "description": "Check identifier (C1-C5 for standard, INV_CUSTOM_* for custom)",
-          "pattern": "^(C[1-5]|INV_.+)$"
+          "description": "Check identifier (sanna.* for standard, INV_CUSTOM_* for custom, C1-C5 legacy)",
+          "pattern": "^(C[1-5]|INV_.+|sanna\\..+)$"
         },
         "name": {
           "type": "string",
@@ -288,6 +372,14 @@
         "reason": {
           "type": ["string", "null"],
           "description": "For custom invariants: explanation of why not evaluated"
+        },
+        "check_impl": {
+          "type": ["string", "null"],
+          "description": "Namespaced check implementation ID (e.g., 'sanna.context_contradiction')"
+        },
+        "replayable": {
+          "type": ["boolean", "null"],
+          "description": "Whether this check is deterministically replayable (true for built-in, false for custom/external)"
         }
       },
       "additionalProperties": false

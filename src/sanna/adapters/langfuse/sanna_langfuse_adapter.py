@@ -118,14 +118,17 @@ def export_receipt(
     trace_dict = langfuse_trace_to_trace_data(trace_data)
 
     if constitution_path is not None:
-        # v0.6.0: Use constitution-driven enforcement
-        from sanna.constitution import load_constitution, sign_constitution, constitution_to_receipt_ref
+        # v0.6.1: Constitution must be signed before use
+        from sanna.constitution import load_constitution, constitution_to_receipt_ref, SannaConstitutionError
         from sanna.enforcement import configure_checks
         from sanna.middleware import _generate_constitution_receipt, _generate_no_invariants_receipt
 
-        loaded = load_constitution(constitution_path)
-        if not loaded.document_hash:
-            loaded = sign_constitution(loaded)
+        loaded = load_constitution(constitution_path, validate=True)
+        if not loaded.policy_hash:
+            raise SannaConstitutionError(
+                f"Constitution is not signed: {constitution_path}. "
+                f"Run: sanna-sign-constitution {constitution_path}"
+            )
         const_ref = constitution_to_receipt_ref(loaded)
         check_configs, custom_records = configure_checks(loaded)
 

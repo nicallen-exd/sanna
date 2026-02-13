@@ -142,7 +142,7 @@ class TestHalt:
 
         assert exc_info.value.receipt is not None
         assert exc_info.value.receipt["coherence_status"] == "FAIL"
-        assert "C1" in str(exc_info.value)
+        assert "context_contradiction" in str(exc_info.value)
 
     def test_halt_receipt_has_enforcement_decision(self):
         agent = make_failing_agent_with_constitution(ALL_HALT_CONST)
@@ -231,7 +231,7 @@ class TestCheckSubset:
         result = agent(query="test", context=SIMPLE_CONTEXT)
 
         check_ids = [c["check_id"] for c in result.receipt["checks"]]
-        assert check_ids == ["C1", "C3"]
+        assert check_ids == ["sanna.context_contradiction", "sanna.false_certainty"]
         assert len(result.receipt["checks"]) == 2
 
     def test_subset_counts_match(self):
@@ -439,7 +439,7 @@ class TestHaltErrorReceipt:
 
         c1 = next(
             c for c in exc_info.value.receipt["checks"]
-            if c["check_id"] == "C1"
+            if c["check_id"] == "sanna.context_contradiction"
         )
         assert not c1["passed"]
         assert c1["severity"] == "critical"

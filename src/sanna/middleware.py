@@ -240,6 +240,8 @@ def _generate_constitution_receipt(
             "triggered_by": cfg.triggered_by,
             "enforcement_level": cfg.enforcement_level,
             "constitution_version": constitution_version,
+            "check_impl": cfg.check_impl or None,
+            "replayable": True,
         })
 
     # Add custom invariants as NOT_CHECKED
@@ -256,10 +258,13 @@ def _generate_constitution_receipt(
             "constitution_version": constitution_version,
             "status": custom.status,
             "reason": custom.reason,
+            "check_impl": None,
+            "replayable": False,
         })
 
     # Count pass/fail (custom invariants don't count as failures)
     standard_checks = [c for c in check_results if not c.get("status") == "NOT_CHECKED"]
+    not_checked = [c for c in check_results if c.get("status") == "NOT_CHECKED"]
     passed = sum(1 for c in standard_checks if c["passed"])
     failed = len(standard_checks) - passed
 
@@ -271,8 +276,22 @@ def _generate_constitution_receipt(
         status = "FAIL"
     elif warning_fails > 0:
         status = "WARN"
+    elif not_checked:
+        status = "PARTIAL"
     else:
         status = "PASS"
+
+    # Build evaluation_coverage
+    total_invariants = len(check_results)
+    evaluated_count = len(standard_checks)
+    not_checked_count = len(not_checked)
+    coverage_basis_points = (evaluated_count * 10000) // total_invariants if total_invariants > 0 else 10000
+    evaluation_coverage = {
+        "total_invariants": total_invariants,
+        "evaluated": evaluated_count,
+        "not_checked": not_checked_count,
+        "coverage_basis_points": coverage_basis_points,
+    }
 
     inputs = {"query": query_text if query_text else None, "context": context if context else None}
     outputs = {"response": final_answer if final_answer else None}
@@ -284,7 +303,7 @@ def _generate_constitution_receipt(
     halt_event_dict = asdict(halt_event) if halt_event else None
     halt_hash_val = hash_obj(halt_event_dict) if halt_event_dict else ""
 
-    # Build fingerprint from check results (include triggered_by and enforcement_level)
+    # Build fingerprint from check results (include all enforcement and impl fields)
     checks_fingerprint_data = [
         {
             "check_id": c["check_id"],
@@ -293,11 +312,14 @@ def _generate_constitution_receipt(
             "evidence": c["evidence"],
             "triggered_by": c.get("triggered_by"),
             "enforcement_level": c.get("enforcement_level"),
+            "check_impl": c.get("check_impl"),
+            "replayable": c.get("replayable"),
         }
         for c in check_results
     ]
     checks_hash = hash_obj(checks_fingerprint_data)
-    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}|{constitution_hash_val}|{halt_hash_val}"
+    coverage_hash = hash_obj(evaluation_coverage)
+    fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}|{constitution_hash_val}|{halt_hash_val}|{coverage_hash}"
     receipt_fingerprint = hash_text(fingerprint_input)
 
     receipt_dict = {
@@ -317,6 +339,7 @@ def _generate_constitution_receipt(
         "checks_passed": passed,
         "checks_failed": failed,
         "coherence_status": status,
+        "evaluation_coverage": evaluation_coverage,
         "constitution_ref": constitution_ref,
         "halt_event": halt_event_dict,
     }
@@ -409,6 +432,8 @@ def sanna_observe(
     context_param: Optional[str] = None,
     query_param: Optional[str] = None,
     constitution_path: Optional[str] = None,
+    private_key_path: Optional[str] = None,
+    strict: bool = True,
     # Legacy parameters — ignored when constitution has invariants
     on_violation: str = "halt",
     checks: Optional[List[str]] = None,
@@ -429,6 +454,8 @@ def sanna_observe(
         receipt_dir: Directory to write receipt JSON. None to skip.
         context_param: Explicit name of the context parameter.
         query_param: Explicit name of the query parameter.
+        strict: If True (default), validate constitution against JSON schema
+            on load. Catches typos like ``invariant:`` instead of ``invariants:``.
         on_violation: Legacy. Used when no constitution invariants are present.
         checks: Legacy. Used when no constitution invariants are present.
         halt_on: Legacy. Used when no constitution invariants are present.
@@ -448,12 +475,15 @@ def sanna_observe(
     custom_records = None
 
     if constitution_path is not None:
-        from .constitution import load_constitution as _load_constitution, sign_constitution, constitution_to_receipt_ref
+        from .constitution import load_constitution as _load_constitution, constitution_to_receipt_ref, SannaConstitutionError
         from .enforcement import configure_checks
 
-        loaded_constitution = _load_constitution(constitution_path)
-        if not loaded_constitution.document_hash:
-            loaded_constitution = sign_constitution(loaded_constitution)
+        loaded_constitution = _load_constitution(constitution_path, validate=strict)
+        if not loaded_constitution.policy_hash:
+            raise SannaConstitutionError(
+                f"Constitution is not signed: {constitution_path}. "
+                f"Run: sanna-sign-constitution {constitution_path}"
+            )
         constitution_ref_override = constitution_to_receipt_ref(loaded_constitution)
 
         # Configure checks from invariants
@@ -462,7 +492,7 @@ def sanna_observe(
         logger.info(
             "Constitution loaded from %s (hash=%s, invariants=%d, checks=%d)",
             constitution_path,
-            loaded_constitution.document_hash[:16],
+            loaded_constitution.policy_hash[:16],
             len(loaded_constitution.invariants),
             len(check_configs),
         )
@@ -582,6 +612,11 @@ def sanna_observe(
 
             # Update extensions with final decision
             receipt["extensions"]["middleware"]["enforcement_decision"] = enforcement_decision
+
+            # 5b. Sign receipt if private key provided
+            if private_key_path is not None:
+                from .crypto import sign_receipt as _sign_receipt
+                receipt = _sign_receipt(receipt, private_key_path)
 
             # 6. Write receipt to disk if configured
             if receipt_dir is not None:

@@ -47,7 +47,7 @@ def make_constitution():
     """Build a sample ConstitutionProvenance."""
     return ConstitutionProvenance(
         document_id="policy-v2-refund",
-        document_hash=hash_text("No refunds on digital products."),
+        policy_hash=hash_text("No refunds on digital products."),
         version="2.0",
         source="policy-repo",
     )
@@ -67,7 +67,7 @@ class TestConstitutionProvenance:
         assert receipt.constitution_ref["document_id"] == "policy-v2-refund"
         assert receipt.constitution_ref["version"] == "2.0"
         assert receipt.constitution_ref["source"] == "policy-repo"
-        assert len(receipt.constitution_ref["document_hash"]) == 16
+        assert len(receipt.constitution_ref["policy_hash"]) == 16
 
     def test_constitution_changes_fingerprint(self):
         """Adding a constitution should change the fingerprint."""
@@ -81,11 +81,11 @@ class TestConstitutionProvenance:
         trace = make_trace()
         c1 = ConstitutionProvenance(
             document_id="policy-v1",
-            document_hash=hash_text("version 1 content"),
+            policy_hash=hash_text("version 1 content"),
         )
         c2 = ConstitutionProvenance(
             document_id="policy-v2",
-            document_hash=hash_text("version 2 content"),
+            policy_hash=hash_text("version 2 content"),
         )
         r1 = generate_receipt(trace, constitution=c1)
         r2 = generate_receipt(trace, constitution=c2)
@@ -118,7 +118,7 @@ class TestConstitutionProvenance:
         """Constitution with only required fields should work."""
         constitution = ConstitutionProvenance(
             document_id="minimal",
-            document_hash=hash_text("content"),
+            policy_hash=hash_text("content"),
         )
         receipt = generate_receipt(make_trace(), constitution=constitution)
         assert receipt.constitution_ref["version"] is None

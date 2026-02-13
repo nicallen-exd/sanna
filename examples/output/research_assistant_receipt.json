@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.6.0",
-  "checks_version": "2",
-  "receipt_id": "25349d495a2e4b83",
-  "receipt_fingerprint": "22519c5f91c0c1cb",
-  "trace_id": "sanna-0764fd8d4f81",
-  "timestamp": "2026-02-13T00:49:07.421706+00:00",
+  "tool_version": "0.6.4",
+  "checks_version": "4",
+  "receipt_id": "31ba8338b7f1f75a",
+  "receipt_fingerprint": "0696dca091d39a28",
+  "trace_id": "sanna-f0b7fc872471",
+  "timestamp": "2026-02-13T06:05:48.265502+00:00",
   "inputs": {
     "query": "Can I get a refund on my software purchase?",
     "context": "Our refund policy: Physical products can be returned within 30 days. Digital products are non-refundable once downloaded. Subscriptions can be cancelled anytime. If the product is defective, exceptions may apply. However, all exceptions require manager approval."
@@ -23,7 +23,7 @@
   },
   "checks": [
     {
-      "check_id": "C1",
+      "check_id": "sanna.context_contradiction",
       "name": "Context Contradiction",
       "passed": false,
       "severity": "critical",
@@ -31,10 +31,12 @@
       "details": "Output may contradict provided context.",
       "triggered_by": "INV_NO_FABRICATION",
       "enforcement_level": "halt",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.context_contradiction",
+      "replayable": true
     },
     {
-      "check_id": "C2",
+      "check_id": "sanna.unmarked_inference",
       "name": "Mark Inferences",
       "passed": true,
       "severity": "info",
@@ -42,10 +44,12 @@
       "details": "Inference marking appears adequate (heuristic check)",
       "triggered_by": "INV_MARK_INFERENCE",
       "enforcement_level": "log",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.unmarked_inference",
+      "replayable": true
     },
     {
-      "check_id": "C3",
+      "check_id": "sanna.false_certainty",
       "name": "No False Certainty",
       "passed": true,
       "severity": "info",
@@ -53,10 +57,12 @@
       "details": "Certainty level appears appropriate (heuristic check)",
       "triggered_by": "INV_NO_FALSE_CERTAINTY",
       "enforcement_level": "log",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.false_certainty",
+      "replayable": true
     },
     {
-      "check_id": "C4",
+      "check_id": "sanna.conflict_collapse",
       "name": "Preserve Tensions",
       "passed": true,
       "severity": "info",
@@ -64,10 +70,12 @@
       "details": "No obvious conflict collapse detected (heuristic check)",
       "triggered_by": "INV_PRESERVE_TENSION",
       "enforcement_level": "log",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.conflict_collapse",
+      "replayable": true
     },
     {
-      "check_id": "C5",
+      "check_id": "sanna.premature_compression",
       "name": "No Premature Compression",
       "passed": true,
       "severity": "info",
@@ -75,29 +83,42 @@
       "details": "Compression level appears appropriate (heuristic check)",
       "triggered_by": "INV_NO_PREMATURE_COMPRESSION",
       "enforcement_level": "log",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.premature_compression",
+      "replayable": true
     }
   ],
   "checks_passed": 4,
   "checks_failed": 1,
   "coherence_status": "FAIL",
+  "evaluation_coverage": {
+    "total_invariants": 5,
+    "evaluated": 5,
+    "not_checked": 0,
+    "coverage_basis_points": 10000
+  },
   "constitution_ref": {
     "document_id": "research-assistant/1.0.0",
-    "document_hash": "1bac9bdc4e72959e4be09f242e197484b9b0bbf1ac98cd84e494f2f8a836a77b",
+    "policy_hash": "6a36ad7b3875964ecf45ec569cee7316144797b6df954f3a312a6a7f0ad4d581",
     "version": "1.0.0",
     "approved_by": [
       "department-chair@university.edu"
     ],
     "approval_date": "2026-01-15",
-    "approval_method": "faculty-review"
+    "approval_method": "faculty-review",
+    "signature": "Lb+ly5BR515fzjBDhxZshPsZpuRLxU1czFHDj9tCHCdxiC/kVkTA5ciTviG2v/7ev/OeSzhaoh07FEezBPUNAw==",
+    "key_id": "c6e4d69a08ab3eaf6c3ed91994a2a7fba302d753782a1dd2b64e1fd7835409ba",
+    "signed_by": "sanna-demo",
+    "signed_at": "2026-02-13T06:05:48.253466+00:00",
+    "scheme": "constitution_sig_v1"
   },
   "halt_event": {
     "halted": true,
-    "reason": "Coherence check failed: C1",
+    "reason": "Coherence check failed: sanna.context_contradiction",
     "failed_checks": [
-      "C1"
+      "sanna.context_contradiction"
     ],
-    "timestamp": "2026-02-13T00:49:07.421654+00:00",
+    "timestamp": "2026-02-13T06:05:48.265420+00:00",
     "enforcement_mode": "halt"
   },
   "extensions": {
@@ -108,5 +129,12 @@
       "function_name": "agent",
       "execution_time_ms": 0
     }
+  },
+  "receipt_signature": {
+    "signature": "CkA2Lnx9lZovvWpICS54kc4OXf6/oct2VCXPYA5784REHacDUK4NVpURYwBiHd7TVgTKx1lVFYO+gWzbVsMPAg==",
+    "key_id": "c6e4d69a08ab3eaf6c3ed91994a2a7fba302d753782a1dd2b64e1fd7835409ba",
+    "signed_by": "",
+    "signed_at": "2026-02-13T06:05:48.265717+00:00",
+    "scheme": "receipt_sig_v1"
   }
 }

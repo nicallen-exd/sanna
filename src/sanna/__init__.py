@@ -5,7 +5,7 @@ Generates portable, offline-verifiable "reasoning receipts" that document
 AI agent decisions with C1-C5 coherence checks and consistency-verified hashing.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.4"
 
 from .hashing import hash_text, hash_obj, canonicalize_text
 from .receipt import (
@@ -21,22 +21,26 @@ from .receipt import (
     SCHEMA_VERSION,
     CHECKS_VERSION,
 )
-from .verify import verify_receipt, load_schema, VerificationResult
+from .verify import verify_receipt, load_schema, VerificationResult, verify_constitution_chain
 from .middleware import sanna_observe, SannaResult, SannaHaltError
 from .constitution import (
     Constitution,
+    ConstitutionSignature,
     Boundary,
     HaltCondition,
     TrustTiers,
     Provenance,
     AgentIdentity,
     Invariant,
+    SannaConstitutionError,
     load_constitution,
     parse_constitution,
     validate_constitution_data,
+    validate_against_schema,
     compute_constitution_hash,
     sign_constitution,
     constitution_to_receipt_ref,
+    constitution_to_signable_dict,
     constitution_to_dict,
     save_constitution,
     scaffold_constitution,
@@ -46,6 +50,15 @@ from .enforcement import (
     CustomInvariantRecord,
     configure_checks,
     INVARIANT_CHECK_MAP,
+    CHECK_REGISTRY,
+)
+from .crypto import (
+    generate_keypair,
+    sign_constitution_full,
+    verify_constitution_full,
+    sign_receipt,
+    verify_receipt_signature,
+    sanitize_for_signing,
 )
 
 __all__ = [
@@ -64,6 +77,7 @@ __all__ = [
     "verify_receipt",
     "load_schema",
     "VerificationResult",
+    "verify_constitution_chain",
     "TOOL_VERSION",
     "SCHEMA_VERSION",
     "CHECKS_VERSION",
@@ -71,6 +85,7 @@ __all__ = [
     "SannaResult",
     "SannaHaltError",
     "Constitution",
+    "ConstitutionSignature",
     "Boundary",
     "HaltCondition",
     "TrustTiers",
@@ -79,15 +94,25 @@ __all__ = [
     "load_constitution",
     "parse_constitution",
     "validate_constitution_data",
+    "validate_against_schema",
     "compute_constitution_hash",
     "sign_constitution",
     "constitution_to_receipt_ref",
+    "constitution_to_signable_dict",
     "constitution_to_dict",
     "save_constitution",
     "scaffold_constitution",
     "Invariant",
+    "SannaConstitutionError",
     "CheckConfig",
     "CustomInvariantRecord",
     "configure_checks",
     "INVARIANT_CHECK_MAP",
+    "CHECK_REGISTRY",
+    "generate_keypair",
+    "sign_constitution_full",
+    "verify_constitution_full",
+    "sign_receipt",
+    "verify_receipt_signature",
+    "sanitize_for_signing",
 ]

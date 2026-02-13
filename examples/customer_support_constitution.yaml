@@ -91,5 +91,4 @@ halt_conditions:
     enforcement: "warn"
 
 # These fields are set by `sanna-sign-constitution` — do not edit manually:
-document_hash: null
-signed_at: null
+policy_hash: null

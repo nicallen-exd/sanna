@@ -9,6 +9,7 @@ from .constitution_engine import (
     CustomInvariantRecord,
     configure_checks,
     INVARIANT_CHECK_MAP,
+    CHECK_REGISTRY,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "CustomInvariantRecord",
     "configure_checks",
     "INVARIANT_CHECK_MAP",
+    "CHECK_REGISTRY",
 ]

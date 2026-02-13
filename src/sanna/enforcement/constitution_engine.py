@@ -21,15 +21,39 @@ from ..receipt import (
 
 
 # =============================================================================
+# NAMESPACED CHECK REGISTRY
+# =============================================================================
+
+# Maps sanna.* check implementation IDs to check functions
+CHECK_REGISTRY: dict[str, Callable] = {
+    "sanna.context_contradiction": check_c1_context_contradiction,
+    "sanna.unmarked_inference": check_c2_unmarked_inference,
+    "sanna.false_certainty": check_c3_false_certainty,
+    "sanna.conflict_collapse": check_c4_conflict_collapse,
+    "sanna.premature_compression": check_c5_premature_compression,
+}
+
+# Legacy C1-C5 aliases for CHECK_REGISTRY
+_LEGACY_CHECK_ALIASES: dict[str, str] = {
+    "C1": "sanna.context_contradiction",
+    "C2": "sanna.unmarked_inference",
+    "C3": "sanna.false_certainty",
+    "C4": "sanna.conflict_collapse",
+    "C5": "sanna.premature_compression",
+}
+
+
+# =============================================================================
 # INVARIANT → CHECK MAPPING
 # =============================================================================
 
+# Maps standard invariant IDs to (check_impl_id, check_fn) tuples
 INVARIANT_CHECK_MAP: dict[str, tuple[str, Callable]] = {
-    "INV_NO_FABRICATION": ("C1", check_c1_context_contradiction),
-    "INV_MARK_INFERENCE": ("C2", check_c2_unmarked_inference),
-    "INV_NO_FALSE_CERTAINTY": ("C3", check_c3_false_certainty),
-    "INV_PRESERVE_TENSION": ("C4", check_c4_conflict_collapse),
-    "INV_NO_PREMATURE_COMPRESSION": ("C5", check_c5_premature_compression),
+    "INV_NO_FABRICATION": ("sanna.context_contradiction", check_c1_context_contradiction),
+    "INV_MARK_INFERENCE": ("sanna.unmarked_inference", check_c2_unmarked_inference),
+    "INV_NO_FALSE_CERTAINTY": ("sanna.false_certainty", check_c3_false_certainty),
+    "INV_PRESERVE_TENSION": ("sanna.conflict_collapse", check_c4_conflict_collapse),
+    "INV_NO_PREMATURE_COMPRESSION": ("sanna.premature_compression", check_c5_premature_compression),
 }
 
 
@@ -40,10 +64,11 @@ INVARIANT_CHECK_MAP: dict[str, tuple[str, Callable]] = {
 @dataclass
 class CheckConfig:
     """Configuration for a single check derived from a constitution invariant."""
-    check_id: str              # "C1"
+    check_id: str              # "sanna.context_contradiction" (namespaced)
     check_fn: Callable         # the actual check function
     enforcement_level: str     # "halt" | "warn" | "log"
     triggered_by: str          # "INV_NO_FABRICATION"
+    check_impl: str = ""       # Namespaced implementation ID (e.g., "sanna.context_contradiction")
 
 
 @dataclass
@@ -64,10 +89,9 @@ def configure_checks(constitution) -> tuple[list[CheckConfig], list[CustomInvari
     """Read constitution invariants, return configured checks and custom invariant records.
 
     Rules:
-    - If invariant ID matches a standard INV_* → map to check function,
-      use invariant's enforcement level
-    - If invariant ID starts with INV_CUSTOM_* or doesn't match standard →
-      record as NOT_CHECKED
+    - If invariant has a `check` field → look up in CHECK_REGISTRY (or legacy aliases)
+    - Else if invariant ID matches a standard INV_* → map to check function
+    - Otherwise → record as NOT_CHECKED (custom invariant)
     - If constitution has no invariants → return empty (no checks run)
 
     Args:
@@ -80,14 +104,42 @@ def configure_checks(constitution) -> tuple[list[CheckConfig], list[CustomInvari
     custom_records: list[CustomInvariantRecord] = []
 
     for invariant in constitution.invariants:
+        # 1. Try explicit check: field
+        if invariant.check:
+            check_impl_id = invariant.check
+            check_fn = CHECK_REGISTRY.get(check_impl_id)
+            # Try legacy alias (e.g., "C1" → "sanna.context_contradiction")
+            if check_fn is None and check_impl_id in _LEGACY_CHECK_ALIASES:
+                resolved = _LEGACY_CHECK_ALIASES[check_impl_id]
+                check_fn = CHECK_REGISTRY.get(resolved)
+                check_impl_id = resolved
+            if check_fn is not None:
+                check_configs.append(CheckConfig(
+                    check_id=check_impl_id,
+                    check_fn=check_fn,
+                    enforcement_level=invariant.enforcement,
+                    triggered_by=invariant.id,
+                    check_impl=check_impl_id,
+                ))
+            else:
+                custom_records.append(CustomInvariantRecord(
+                    invariant_id=invariant.id,
+                    rule=invariant.rule,
+                    enforcement=invariant.enforcement,
+                    reason=f"Check '{invariant.check}' not found in registry.",
+                ))
+            continue
+
+        # 2. Try standard INVARIANT_CHECK_MAP
         mapping = INVARIANT_CHECK_MAP.get(invariant.id)
         if mapping is not None:
-            check_id, check_fn = mapping
+            check_impl_id, check_fn = mapping
             check_configs.append(CheckConfig(
-                check_id=check_id,
+                check_id=check_impl_id,
                 check_fn=check_fn,
                 enforcement_level=invariant.enforcement,
                 triggered_by=invariant.id,
+                check_impl=check_impl_id,
             ))
         else:
             custom_records.append(CustomInvariantRecord(

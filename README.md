@@ -1,18 +1,10 @@
 # Sanna
 
-Reasoning receipts for AI agents.
+AI governance infrastructure that generates cryptographically signed "reasoning receipts" — portable JSON artifacts that document AI agent decisions and verify reasoning integrity offline. Constitutions define the rules. Checks enforce them. Receipts prove it happened. The name means "truth" in Swedish.
 
 ```bash
 pip install sanna
 ```
-
-## The Problem
-
-Observability tools show you what your agent did. Guardrails filter what it says. Neither proves the reasoning was sound.
-
-When an agent tells a customer they're eligible for a refund — but the policy says digital products are non-refundable — that's not a hallucination problem. It's a coherence problem. The output contradicts the context the agent was given.
-
-Sanna catches this at runtime. It checks whether agent output is consistent with the context, constraints, and evidence it received. When it's not, Sanna can halt execution before the bad answer leaves the system. Every execution produces a signed receipt — a portable JSON artifact that documents what checks ran, what passed, and what failed. Anyone can verify a receipt offline, without platform access.
 
 ## How It Works
 
@@ -55,14 +47,25 @@ boundaries:
 
 Each invariant maps to a coherence check. The `enforcement` field controls what happens when that check fails — `halt` stops execution, `warn` emits a Python warning, `log` records silently.
 
-### 2. Wrap your agent function
+### 2. Sign it
+
+```bash
+sanna-keygen --signed-by "your-name@company.com"
+sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
+```
+
+Constitutions are Ed25519-signed. The signature covers the full document — identity, provenance, invariants, and signer metadata. Tampering with any field invalidates the signature.
+
+### 3. Wrap your agent function
 
 ```python
 from sanna import sanna_observe, SannaHaltError
 
-@sanna_observe(constitution_path="constitution.yaml")
+@sanna_observe(
+    constitution_path="constitution.yaml",
+    private_key_path="sanna_ed25519.key",
+)
 def support_agent(query: str, context: str) -> str:
-    # Your agent logic here — call an LLM, run a chain, whatever
     return llm.generate(query=query, context=context)
 
 try:
@@ -71,91 +74,38 @@ try:
         context="Digital products are non-refundable once downloaded."
     )
     print(result.output)          # The agent's response
-    print(result.receipt)         # The reasoning receipt
+    print(result.receipt)         # The reasoning receipt (dict)
 except SannaHaltError as e:
     print(f"HALTED: {e}")
     print(e.receipt)              # Receipt is still available
 ```
 
-### 3. The constitution drives enforcement
+The constitution drives enforcement at runtime. Only invariants listed in the constitution are evaluated. Each check enforces independently — halt, warn, or log.
 
-The constitution is the control plane. It determines:
-- **Which checks run** — only invariants listed in the constitution are evaluated
-- **How each check enforces** — halt, warn, or log, independently per check
-- **What the receipt records** — each check result includes which invariant triggered it and at what enforcement level
-
-No constitution, no checks. The same check engine produces completely different behavior depending on which constitution you wire in.
-
-### 4. Every execution produces a receipt
-
-```json
-{
-  "schema_version": "0.1",
-  "tool_version": "0.6.0",
-  "checks_version": "2",
-  "receipt_id": "fcd1c4918c31b76c",
-  "receipt_fingerprint": "8c7e0b940153957d",
-  "trace_id": "sanna-610f457a11ae",
-  "coherence_status": "FAIL",
-  "checks": [
-    {
-      "check_id": "C1",
-      "name": "Context Contradiction",
-      "passed": false,
-      "severity": "critical",
-      "evidence": "Output suggests eligibility despite 'non-refundable' in context",
-      "triggered_by": "INV_NO_FABRICATION",
-      "enforcement_level": "halt",
-      "constitution_version": "1.0.0"
-    }
-  ],
-  "constitution_ref": {
-    "document_id": "strict-financial-analyst/1.0.0",
-    "document_hash": "5ba94fe48ed5532f...",
-    "approved_by": ["cfo@company.com", "compliance@company.com"]
-  },
-  "halt_event": {
-    "halted": true,
-    "reason": "Coherence check failed: C1",
-    "failed_checks": ["C1"],
-    "enforcement_mode": "halt"
-  }
-}
-```
-
-Receipts include consistency-verified hashes (canonical SHA-256). If anyone modifies the inputs, outputs, check results, or constitution reference after generation, verification detects the tampering.
-
-### 5. Verify offline
+### 4. Verify offline
 
 ```bash
 sanna-verify receipt.json
+sanna-verify receipt.json --public-key sanna_ed25519.pub
+sanna-verify receipt.json --constitution constitution.yaml --constitution-public-key sanna_ed25519.pub
 ```
 
-No network. No API keys. No platform access. Exit codes: 0=valid, 2=schema invalid, 3=fingerprint mismatch, 4=consistency error.
+No network. No API keys. No platform access. Full chain verification: receipt integrity, Ed25519 signature, receipt-to-constitution provenance bond, constitution signature.
 
-## Three Constitutions Demo
+Exit codes: 0=valid, 2=schema invalid, 3=fingerprint mismatch, 4=consistency error, 5=other error.
 
-Same agent. Same input. Same bad output. Three different constitutions. Three different outcomes.
+## Key Capabilities
 
-The input: a customer asks about a software refund. The context says digital products are non-refundable. The agent says they're eligible. This contradicts the context — C1 should catch it.
-
-| Constitution | Invariants | C1 Enforcement | Outcome |
-|---|---|---|---|
-| **Strict Financial Analyst** | All 5 at `halt` | halt | **HALTED** — execution stopped |
-| **Permissive Support Agent** | 2 at `warn` + 1 custom | warn | **WARNED** — continued with warning |
-| **Research Assistant** | C1 `halt`, rest `log` | halt | **HALTED** — only C1 can stop it |
-
-The permissive agent has the same C1 failure, but its constitution says `warn` — so the agent continues and the violation is recorded in the receipt. The strict analyst halts immediately. The research assistant halts on fabrication but only logs everything else.
-
-Run it yourself:
-
-```bash
-python examples/three_constitutions_demo.py
-```
+- **Constitution-as-control-plane** — YAML governance rules with invariants that drive check behavior and enforcement levels (halt/warn/log)
+- **Ed25519 cryptographic signatures** — on both constitutions and receipts, with full document binding (tampering with provenance or signer metadata invalidates the signature)
+- **Receipt-to-constitution provenance bond** — offline verification of the complete chain from receipt to the specific signed constitution version that governed the execution
+- **RFC 8785-style JSON canonicalization** — deterministic canonical bytes for cross-language verifier portability; floats rejected at signing boundary
+- **Five coherence checks (C1-C5)** — context contradiction, unmarked inference, false certainty, conflict collapse, premature compression; stable IDs, replayable results
+- **PARTIAL status with evaluation coverage** — custom invariants that can't yet be auto-evaluated are documented as NOT_CHECKED with integer basis-point coverage reporting
+- **Full chain verification in one CLI command** — receipt schema, fingerprint, signature, constitution bond, constitution signature
+- **Langfuse adapter** — generate receipts from Langfuse traces with constitution enforcement
 
 ## Coherence Checks
-
-Every invariant in your constitution maps to a check function:
 
 | Invariant | Check | What it catches |
 |---|---|---|
@@ -165,27 +115,33 @@ Every invariant in your constitution maps to a check function:
 | `INV_PRESERVE_TENSION` | C4 — Preserve Tensions | Conflicting information collapsed into a single answer |
 | `INV_NO_PREMATURE_COMPRESSION` | C5 — No Premature Compression | Complex, multi-faceted input reduced to a single sentence |
 
-All checks are heuristic (pattern matching). They flag potential issues for human review — they don't claim to definitively prove reasoning failure.
+All checks are heuristic (pattern matching). They flag potential issues for human review. Custom invariants (any ID not in the built-in mapping) appear in the receipt as `NOT_CHECKED` — they document the policy but have no built-in evaluator.
 
-Custom invariants (any ID starting with `INV_CUSTOM_`) appear in the receipt as `NOT_CHECKED` — they document the policy but have no built-in evaluator.
+## Three Constitutions Demo
+
+Same agent. Same input. Same bad output. Three different constitutions. Three different outcomes.
+
+| Constitution | Invariants | C1 Enforcement | Outcome |
+|---|---|---|---|
+| **Strict Financial Analyst** | All 5 at `halt` | halt | **HALTED** — execution stopped |
+| **Permissive Support Agent** | 2 at `warn` + 1 custom | warn | **WARNED** — continued with warning |
+| **Research Assistant** | C1 `halt`, rest `log` | halt | **HALTED** — only C1 can stop it |
+
+```bash
+python examples/three_constitutions_demo.py
+```
 
 ## CLI Tools
 
-```bash
-# Scaffold a new constitution
-sanna-init-constitution -o constitution.yaml
-
-# Validate and sign a constitution (sets document_hash)
-sanna-sign-constitution constitution.yaml
-
-# Verify a receipt offline
-sanna-verify receipt.json
-sanna-verify receipt.json --format json
-
-# Generate a receipt from a Langfuse trace
-sanna-generate <trace_id>
-sanna-generate <trace_id> --format json -o receipt.json
-```
+| Command | Description |
+|---|---|
+| `sanna-verify` | Verify receipt integrity and full provenance chain |
+| `sanna-generate` | Generate a receipt from a Langfuse trace |
+| `sanna-keygen` | Generate Ed25519 keypair for signing |
+| `sanna-sign-constitution` | Cryptographically sign a constitution with Ed25519 |
+| `sanna-hash-constitution` | Compute policy hash without Ed25519 signing |
+| `sanna-verify-constitution` | Verify a constitution's Ed25519 signature |
+| `sanna-init-constitution` | Scaffold a new constitution YAML |
 
 ## Langfuse Integration
 
@@ -200,30 +156,6 @@ langfuse = Langfuse(...)
 trace = langfuse.fetch_trace(trace_id)
 receipt = export_receipt(trace.data, constitution_path="constitution.yaml")
 ```
-
-## What Sanna Is NOT
-
-- **Not observability.** LangSmith, Langfuse, etc. show you what happened. Sanna checks whether the reasoning held together.
-- **Not guardrails.** NeMo Guardrails, Guardrails AI, etc. filter inputs and outputs. Sanna evaluates the logic between them.
-- **Not testing.** Tests run before deployment. Sanna runs during execution, on every call, with production data.
-
-Sanna sits at the boundary between the agent and the world. It answers: **was the reasoning valid?** — not just **what happened?**
-
-## Why Receipts Matter
-
-The critical moment is the handover — when an agent's output leaves the platform and becomes someone else's input. A customer gets an answer. A downstream system gets a decision. A report gets filed.
-
-At that point, the trace is gone. The observability dashboard is behind a login. The guardrail logs are in a different system. Nobody outside the team can verify what happened.
-
-A receipt is the artifact that survives the handover. It's portable, self-contained, and offline-verifiable. It documents what checks ran, what passed, what failed, and what the enforcement decision was. The constitution reference proves which policy was in effect. The fingerprint proves nothing was modified after generation.
-
-Receipts turn "trust us, we checked" into "here's the proof — verify it yourself."
-
-## Roadmap
-
-- **v0.6.0** — Constitution enforcement. The constitution drives the check engine. Per-invariant enforcement levels. Custom invariants. Three Constitutions Demo. *(current release)*
-- **v0.7.0** — MCP server. Expose Sanna checks as Model Context Protocol tools.
-- **v0.8.0** — Constitution lifecycle. Version history, approval workflows, diff-and-sign.
 
 ## Install
 
@@ -241,7 +173,7 @@ pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
 
-300 tests. 0 failures.
+427 tests. 0 failures.
 
 ## License
 

@@ -1,23 +1,23 @@
-# Test constitution — no invariants section
-sanna_constitution: "1.0.0"
-
+sanna_constitution: 1.0.0
 identity:
-  agent_name: "test-no-invariants"
-  domain: "testing"
-  description: "Constitution with no invariants"
-
+  agent_name: test-no-invariants
+  domain: testing
+  description: Constitution with no invariants
 provenance:
-  authored_by: "tester@test.com"
+  authored_by: tester@test.com
   approved_by:
-    - "approver@test.com"
-  approval_date: "2026-01-01"
-  approval_method: "test-approval"
-
+  - approver@test.com
+  approval_date: '2026-01-01'
+  approval_method: test-approval
+  change_history: []
 boundaries:
-  - id: "B001"
-    description: "Test boundary"
-    category: "scope"
-    severity: "medium"
-
-document_hash: null
-signed_at: null
+- id: B001
+  description: Test boundary
+  category: scope
+  severity: medium
+trust_tiers:
+  autonomous: []
+  requires_approval: []
+  prohibited: []
+halt_conditions: []
+policy_hash: da5d8d1c93d2d4a18e59a955cdb0ba6be36f158767c28e394163c82c93ddbd39

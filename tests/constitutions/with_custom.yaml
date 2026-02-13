@@ -1,34 +1,36 @@
-# Test constitution — standard invariants + custom invariant
-sanna_constitution: "1.0.0"
-
+sanna_constitution: 1.0.0
 identity:
-  agent_name: "test-with-custom"
-  domain: "testing"
-  description: "Standard checks plus a custom invariant"
-
+  agent_name: test-with-custom
+  domain: testing
+  description: Standard checks plus a custom invariant
 provenance:
-  authored_by: "tester@test.com"
+  authored_by: tester@test.com
   approved_by:
-    - "approver@test.com"
-  approval_date: "2026-01-01"
-  approval_method: "test-approval"
-
-invariants:
-  - id: "INV_NO_FABRICATION"
-    rule: "Do not claim facts absent from provided sources."
-    enforcement: "halt"
-  - id: "INV_PRESERVE_TENSION"
-    rule: "Do not collapse conflicting evidence."
-    enforcement: "warn"
-  - id: "INV_CUSTOM_NO_PII"
-    rule: "Never include personally identifiable information in responses."
-    enforcement: "halt"
-
+  - approver@test.com
+  approval_date: '2026-01-01'
+  approval_method: test-approval
+  change_history: []
 boundaries:
-  - id: "B001"
-    description: "Test boundary"
-    category: "scope"
-    severity: "medium"
-
-document_hash: null
-signed_at: null
+- id: B001
+  description: Test boundary
+  category: scope
+  severity: medium
+trust_tiers:
+  autonomous: []
+  requires_approval: []
+  prohibited: []
+halt_conditions: []
+invariants:
+- id: INV_NO_FABRICATION
+  rule: Do not claim facts absent from provided sources.
+  enforcement: halt
+  check: null
+- id: INV_PRESERVE_TENSION
+  rule: Do not collapse conflicting evidence.
+  enforcement: warn
+  check: null
+- id: INV_CUSTOM_NO_PII
+  rule: Never include personally identifiable information in responses.
+  enforcement: halt
+  check: null
+policy_hash: 563e6fad18a8b6c3094b663e13a145d20f5bbb0cadd80a2dba9e209b601096ad

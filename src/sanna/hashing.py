@@ -1,11 +1,36 @@
 """
 Canonical hashing for deterministic receipts across platforms.
+
+Canonicalization follows RFC 8785 (JSON Canonicalization Scheme) for the
+restricted type set used by Sanna: str, int, bool, None, list, dict.
+Floats are rejected at serialization time — all numeric values must be
+integers.  This avoids IEEE 754 representation ambiguity and guarantees
+deterministic canonical bytes across every Python implementation.
 """
 
 import hashlib
 import json
 import unicodedata
 from typing import Any
+
+
+def _reject_floats(obj: Any, path: str = "$") -> None:
+    """Recursively reject float values in a structure.
+
+    Raises TypeError with the JSON-path of the offending value so the
+    caller can fix it before canonicalization.
+    """
+    if isinstance(obj, float):
+        raise TypeError(
+            f"Float value {obj!r} at {path} — Sanna requires integers for "
+            f"RFC 8785 canonical JSON.  Convert to int (e.g. basis points)."
+        )
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            _reject_floats(val, f"{path}.{key}")
+    elif isinstance(obj, (list, tuple)):
+        for idx, val in enumerate(obj):
+            _reject_floats(val, f"{path}[{idx}]")
 
 
 def canonicalize_text(s: str) -> str:
@@ -22,7 +47,13 @@ def canonicalize_text(s: str) -> str:
 
 
 def canonical_json_bytes(obj: Any) -> bytes:
-    """Serialize object to canonical JSON bytes."""
+    """Serialize *obj* to RFC 8785 canonical JSON bytes.
+
+    The implementation covers the restricted type set used by Sanna
+    (str, int, bool, None, list, dict).  Floats are rejected — call
+    sites must use integers (e.g. basis-points instead of percentages).
+    """
+    _reject_floats(obj)
     canon = json.dumps(
         obj,
         sort_keys=True,

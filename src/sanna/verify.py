@@ -99,9 +99,24 @@ def verify_fingerprint(receipt: dict) -> tuple:
 
     # Include checks in fingerprint so tampering with check results is detected
     checks = receipt.get("checks", [])
-    # v0.6.0: include triggered_by and enforcement_level in fingerprint if present
+    # v0.6.1: include check_impl and replayable in fingerprint if present
+    has_v061_fields = any(c.get("check_impl") is not None or c.get("replayable") is not None for c in checks)
     has_enforcement_fields = any(c.get("triggered_by") is not None for c in checks)
-    if has_enforcement_fields:
+    if has_v061_fields:
+        checks_data = [
+            {
+                "check_id": c.get("check_id", ""),
+                "passed": c.get("passed"),
+                "severity": c.get("severity", ""),
+                "evidence": c.get("evidence"),
+                "triggered_by": c.get("triggered_by"),
+                "enforcement_level": c.get("enforcement_level"),
+                "check_impl": c.get("check_impl"),
+                "replayable": c.get("replayable"),
+            }
+            for c in checks
+        ]
+    elif has_enforcement_fields:
         checks_data = [
             {
                 "check_id": c.get("check_id", ""),
@@ -117,13 +132,19 @@ def verify_fingerprint(receipt: dict) -> tuple:
         checks_data = [{"check_id": c.get("check_id", ""), "passed": c.get("passed"), "severity": c.get("severity", ""), "evidence": c.get("evidence")} for c in checks]
     checks_hash = hash_obj(checks_data)
 
-    # Include constitution_ref and halt_event in fingerprint
+    # Include constitution_ref, halt_event, and evaluation_coverage in fingerprint
     constitution_ref = receipt.get("constitution_ref")
     halt_event = receipt.get("halt_event")
+    evaluation_coverage = receipt.get("evaluation_coverage")
     constitution_hash = hash_obj(constitution_ref) if constitution_ref else ""
     halt_hash = hash_obj(halt_event) if halt_event else ""
 
-    fingerprint_input = f"{trace_id}|{context_hash}|{output_hash}|{checks_version}|{checks_hash}|{constitution_hash}|{halt_hash}"
+    # v0.6.1: include evaluation_coverage in fingerprint if present
+    if evaluation_coverage is not None:
+        coverage_hash = hash_obj(evaluation_coverage)
+        fingerprint_input = f"{trace_id}|{context_hash}|{output_hash}|{checks_version}|{checks_hash}|{constitution_hash}|{halt_hash}|{coverage_hash}"
+    else:
+        fingerprint_input = f"{trace_id}|{context_hash}|{output_hash}|{checks_version}|{checks_hash}|{constitution_hash}|{halt_hash}"
     computed = hash_text(fingerprint_input)
     expected = receipt.get("receipt_fingerprint", "")
 
@@ -144,6 +165,7 @@ def verify_status_consistency(receipt: dict) -> tuple:
     checks = receipt.get("checks", [])
     # Exclude NOT_CHECKED custom invariants from status computation
     standard_checks = [c for c in checks if c.get("status") != "NOT_CHECKED"]
+    not_checked = [c for c in checks if c.get("status") == "NOT_CHECKED"]
 
     critical_fails = sum(1 for c in standard_checks if not c.get("passed") and c.get("severity") == "critical")
     warning_fails = sum(1 for c in standard_checks if not c.get("passed") and c.get("severity") == "warning")
@@ -152,6 +174,8 @@ def verify_status_consistency(receipt: dict) -> tuple:
         computed = "FAIL"
     elif warning_fails > 0:
         computed = "WARN"
+    elif not_checked:
+        computed = "PARTIAL"
     else:
         computed = "PASS"
 
@@ -215,7 +239,7 @@ def verify_content_hashes(receipt: dict) -> list:
 
 
 def verify_constitution_hash(receipt: dict) -> list:
-    """Verify constitution_ref.document_hash is a valid hex hash if present.
+    """Verify constitution_ref.policy_hash is a valid hex hash if present.
 
     Accepts both 16-char (legacy ConstitutionProvenance) and 64-char
     (full SHA-256 from constitution lifecycle) hashes.
@@ -223,14 +247,112 @@ def verify_constitution_hash(receipt: dict) -> list:
     errors = []
     constitution_ref = receipt.get("constitution_ref")
     if constitution_ref:
-        doc_hash = constitution_ref.get("document_hash", "")
+        doc_hash = constitution_ref.get("policy_hash", "")
         hex_pattern = re.compile(r"^[a-f0-9]{16,64}$")
         if not hex_pattern.match(doc_hash):
-            errors.append(f"constitution_ref.document_hash has invalid format: '{doc_hash}' (expected 16-64 hex chars)")
+            errors.append(f"constitution_ref.policy_hash has invalid format: '{doc_hash}' (expected 16-64 hex chars)")
     return errors
 
 
-def verify_receipt(receipt: dict, schema: dict) -> VerificationResult:
+def verify_constitution_chain(
+    receipt: dict,
+    constitution_path: str,
+    constitution_public_key_path: str | None = None,
+) -> list:
+    """Verify the receipt-constitution chain.
+
+    Checks:
+    1. Constitution loads and policy_hash is valid.
+    2. receipt.constitution_ref.policy_hash matches constitution.
+    3. If public key provided, verifies constitution Ed25519 signature.
+    4. If constitution_ref.key_id exists, matches constitution's key_id.
+
+    Returns list of error strings.
+    """
+    errors = []
+
+    from .constitution import load_constitution, compute_constitution_hash, SannaConstitutionError
+
+    try:
+        constitution = load_constitution(constitution_path)
+    except SannaConstitutionError as e:
+        errors.append(f"Constitution integrity check failed: {e}")
+        return errors
+    except FileNotFoundError as e:
+        errors.append(f"Constitution not found: {e}")
+        return errors
+    except ValueError as e:
+        errors.append(f"Constitution validation failed: {e}")
+        return errors
+
+    if not constitution.policy_hash:
+        errors.append("Constitution is not signed (no policy_hash)")
+        return errors
+
+    # Verify policy_hash matches
+    computed = compute_constitution_hash(constitution)
+    if computed != constitution.policy_hash:
+        errors.append(
+            f"Constitution policy_hash mismatch: computed {computed[:16]}..., "
+            f"stored {constitution.policy_hash[:16]}..."
+        )
+
+    # Check receipt's constitution_ref matches
+    const_ref = receipt.get("constitution_ref")
+    if const_ref:
+        receipt_hash = const_ref.get("policy_hash", "")
+        if receipt_hash != constitution.policy_hash:
+            errors.append(
+                f"Receipt-constitution bond mismatch: receipt has policy_hash={receipt_hash[:16]}..., "
+                f"constitution has {constitution.policy_hash[:16]}..."
+            )
+
+        # Verify signature value matches between receipt and constitution
+        receipt_sig_value = const_ref.get("signature")
+        const_sig = constitution.provenance.signature
+        const_sig_value = const_sig.value if const_sig else None
+        if receipt_sig_value and const_sig_value:
+            if receipt_sig_value != const_sig_value:
+                errors.append(
+                    "Receipt references a different signed version of this constitution."
+                )
+            receipt_scheme = const_ref.get("scheme")
+            const_scheme = const_sig.scheme if const_sig else None
+            if receipt_scheme and const_scheme and receipt_scheme != const_scheme:
+                errors.append(
+                    f"Signature scheme mismatch: receipt has {receipt_scheme}, "
+                    f"constitution has {const_scheme}"
+                )
+
+        # Verify constitution Ed25519 signature
+        if constitution_public_key_path:
+            sig = constitution.provenance.signature
+            if not sig or not sig.value:
+                errors.append("Constitution has no Ed25519 signature but --constitution-public-key was provided")
+            else:
+                from .crypto import verify_constitution_full
+                valid = verify_constitution_full(constitution, constitution_public_key_path)
+                if not valid:
+                    errors.append("Constitution signature verification FAILED")
+
+                # Check key_id matches
+                ref_key_id = const_ref.get("key_id")
+                if ref_key_id and sig.key_id and ref_key_id != sig.key_id:
+                    errors.append(
+                        f"Key ID mismatch: receipt has key_id={ref_key_id}, "
+                        f"constitution has key_id={sig.key_id}"
+                    )
+
+    return errors
+
+
+def verify_receipt(
+    receipt: dict,
+    schema: dict,
+    public_key_path: str | None = None,
+    constitution_path: str | None = None,
+    constitution_public_key_path: str | None = None,
+) -> VerificationResult:
     """
     Full receipt verification.
 
@@ -284,6 +406,22 @@ def verify_receipt(receipt: dict, schema: dict) -> VerificationResult:
     has_critical_fail = any(not c.get("passed") and c.get("severity") == "critical" for c in checks)
     if receipt.get("coherence_status") == "FAIL" and has_critical_fail and not receipt.get("halt_event"):
         warnings.append("Receipt has FAIL status with critical check failure but no halt_event recorded")
+
+    # 7. Receipt signature verification (if public key provided)
+    if public_key_path:
+        sig_block = receipt.get("receipt_signature")
+        if not sig_block:
+            errors.append("Receipt has no signature but --public-key was provided")
+        else:
+            from .crypto import verify_receipt_signature
+            sig_valid = verify_receipt_signature(receipt, public_key_path)
+            if not sig_valid:
+                errors.append("Receipt signature verification FAILED — receipt may have been tampered")
+
+    # 8. Constitution chain verification (if constitution path provided)
+    if constitution_path:
+        chain_errors = verify_constitution_chain(receipt, constitution_path, constitution_public_key_path)
+        errors.extend(chain_errors)
 
     # Determine result
     if not fp_match:

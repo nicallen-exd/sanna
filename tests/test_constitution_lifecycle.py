@@ -321,13 +321,12 @@ class TestHashing:
 class TestSigning:
     def test_sign_sets_hash(self):
         signed = _signed_constitution()
-        assert signed.document_hash is not None
-        assert _HEX64.match(signed.document_hash)
+        assert signed.policy_hash is not None
+        assert _HEX64.match(signed.policy_hash)
 
-    def test_sign_sets_timestamp(self):
+    def test_sign_without_key_has_no_signature(self):
         signed = _signed_constitution()
-        assert signed.signed_at is not None
-        assert "T" in signed.signed_at  # ISO 8601
+        assert signed.provenance.signature is None
 
     def test_sign_preserves_content(self):
         original = _sample_constitution()
@@ -338,12 +337,12 @@ class TestSigning:
     def test_sign_returns_new_object(self):
         original = _sample_constitution()
         signed = sign_constitution(original)
-        assert original.document_hash is None
-        assert signed.document_hash is not None
+        assert original.policy_hash is None
+        assert signed.policy_hash is not None
 
     def test_sign_hash_matches_compute(self):
         signed = _signed_constitution()
-        assert signed.document_hash == compute_constitution_hash(signed)
+        assert signed.policy_hash == compute_constitution_hash(signed)
 
 
 # =============================================================================
@@ -354,7 +353,7 @@ class TestReceiptRef:
     def test_receipt_ref_structure(self):
         ref = constitution_to_receipt_ref(_signed_constitution())
         assert "document_id" in ref
-        assert "document_hash" in ref
+        assert "policy_hash" in ref
         assert "version" in ref
         assert "approved_by" in ref
         assert "approval_date" in ref
@@ -367,7 +366,7 @@ class TestReceiptRef:
 
     def test_receipt_ref_hash_is_64_chars(self):
         ref = constitution_to_receipt_ref(_signed_constitution())
-        assert _HEX64.match(ref["document_hash"])
+        assert _HEX64.match(ref["policy_hash"])
 
     def test_receipt_ref_unsigned_raises(self):
         with pytest.raises(ValueError, match="must be signed"):
@@ -390,7 +389,7 @@ class TestFileIO:
         save_constitution(original, path)
         loaded = load_constitution(path)
         assert loaded.identity.agent_name == original.identity.agent_name
-        assert loaded.document_hash == original.document_hash
+        assert loaded.policy_hash == original.policy_hash
         assert loaded.schema_version == original.schema_version
 
     def test_json_round_trip(self, tmp_path):
@@ -399,7 +398,7 @@ class TestFileIO:
         save_constitution(original, path)
         loaded = load_constitution(path)
         assert loaded.identity.agent_name == original.identity.agent_name
-        assert loaded.document_hash == original.document_hash
+        assert loaded.policy_hash == original.policy_hash
 
     def test_dict_round_trip(self):
         original = _signed_constitution()
@@ -471,7 +470,7 @@ class TestReceiptRefOverride:
         """constitution_ref_override should take precedence over constitution param."""
         legacy = ConstitutionProvenance(
             document_id="legacy-doc",
-            document_hash=hash_text("legacy content"),
+            policy_hash=hash_text("legacy content"),
         )
         signed = _signed_constitution()
         ref = constitution_to_receipt_ref(signed)
@@ -481,7 +480,7 @@ class TestReceiptRefOverride:
             constitution_ref_override=ref,
         )
         assert receipt.constitution_ref["document_id"] == "test-agent/0.1.0"
-        assert _HEX64.match(receipt.constitution_ref["document_hash"])
+        assert _HEX64.match(receipt.constitution_ref["policy_hash"])
 
     def test_override_fingerprint_verifies(self):
         """Fingerprint should verify when constitution_ref_override is used."""
@@ -516,7 +515,7 @@ class TestReceiptRefOverride:
         ref = constitution_to_receipt_ref(signed)
         receipt = generate_receipt(_make_trace(), constitution_ref_override=ref)
         receipt_dict = asdict(receipt)
-        receipt_dict["constitution_ref"]["document_hash"] = "a" * 64
+        receipt_dict["constitution_ref"]["policy_hash"] = "a" * 64
         match, _, _ = verify_fingerprint(receipt_dict)
         assert not match
 
@@ -549,7 +548,7 @@ class TestMiddlewareConstitutionPath:
         ref = result.receipt["constitution_ref"]
         assert ref is not None
         assert ref["document_id"] == "test-agent/0.1.0"
-        assert _HEX64.match(ref["document_hash"])
+        assert _HEX64.match(ref["policy_hash"])
         assert ref["approved_by"] == ["lead@example.com", "compliance@example.com"]
         assert ref["approval_date"] == "2026-01-15"
         assert ref["approval_method"] == "github-pr-review"
@@ -599,30 +598,27 @@ class TestMiddlewareConstitutionPath:
         result = my_agent(query="test?", context="pytest")
         ref = result.receipt["constitution_ref"]
         assert ref is not None
-        assert _HEX64.match(ref["document_hash"])
+        assert _HEX64.match(ref["policy_hash"])
         # Fingerprint should still verify
         match, _, _ = verify_fingerprint(result.receipt)
         assert match
 
-    def test_constitution_path_unsigned_auto_signs(self, tmp_path):
-        """An unsigned constitution file should be auto-signed at decoration time."""
+    def test_constitution_path_unsigned_raises(self, tmp_path):
+        """An unsigned constitution file should raise SannaConstitutionError."""
+        from sanna.constitution import SannaConstitutionError
+
         # Write an unsigned constitution
         data = _sample_constitution_data()
-        data["document_hash"] = None
-        data["signed_at"] = None
+        data["policy_hash"] = None
         import yaml
         path = tmp_path / "unsigned.yaml"
         with open(path, "w") as f:
             yaml.dump(data, f)
 
-        @sanna_observe(on_violation="log", constitution_path=str(path))
-        def my_agent(query, context):
-            return "Response."
-
-        result = my_agent(query="q", context="c")
-        ref = result.receipt["constitution_ref"]
-        assert ref is not None
-        assert _HEX64.match(ref["document_hash"])
+        with pytest.raises(SannaConstitutionError, match="not signed"):
+            @sanna_observe(on_violation="log", constitution_path=str(path))
+            def my_agent(query, context):
+                return "Response."
 
 
 # =============================================================================
@@ -633,21 +629,21 @@ class TestVerify64CharHash:
     def test_verify_accepts_64_char_hash(self):
         """verify_constitution_hash should accept 64-char hashes."""
         from sanna.verify import verify_constitution_hash
-        receipt = {"constitution_ref": {"document_hash": "a" * 64}}
+        receipt = {"constitution_ref": {"policy_hash": "a" * 64}}
         errors = verify_constitution_hash(receipt)
         assert errors == []
 
     def test_verify_accepts_16_char_hash(self):
         """verify_constitution_hash should still accept legacy 16-char hashes."""
         from sanna.verify import verify_constitution_hash
-        receipt = {"constitution_ref": {"document_hash": "a" * 16}}
+        receipt = {"constitution_ref": {"policy_hash": "a" * 16}}
         errors = verify_constitution_hash(receipt)
         assert errors == []
 
     def test_verify_rejects_invalid_hash_length(self):
         """verify_constitution_hash should reject hashes outside 16-64 range."""
         from sanna.verify import verify_constitution_hash
-        receipt = {"constitution_ref": {"document_hash": "abc"}}
+        receipt = {"constitution_ref": {"policy_hash": "abc"}}
         errors = verify_constitution_hash(receipt)
         assert len(errors) == 1
         assert "invalid format" in errors[0]
@@ -655,6 +651,6 @@ class TestVerify64CharHash:
     def test_verify_rejects_non_hex(self):
         """verify_constitution_hash should reject non-hex characters."""
         from sanna.verify import verify_constitution_hash
-        receipt = {"constitution_ref": {"document_hash": "g" * 64}}
+        receipt = {"constitution_ref": {"policy_hash": "g" * 64}}
         errors = verify_constitution_hash(receipt)
         assert len(errors) == 1

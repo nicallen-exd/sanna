@@ -1,31 +1,32 @@
-# Test constitution — only C1 and C3 checks
-sanna_constitution: "1.0.0"
-
+sanna_constitution: 1.0.0
 identity:
-  agent_name: "test-c1-c3"
-  domain: "testing"
-  description: "Only INV_NO_FABRICATION and INV_NO_FALSE_CERTAINTY"
-
+  agent_name: test-c1-c3
+  domain: testing
+  description: Only INV_NO_FABRICATION and INV_NO_FALSE_CERTAINTY
 provenance:
-  authored_by: "tester@test.com"
+  authored_by: tester@test.com
   approved_by:
-    - "approver@test.com"
-  approval_date: "2026-01-01"
-  approval_method: "test-approval"
-
-invariants:
-  - id: "INV_NO_FABRICATION"
-    rule: "Do not claim facts absent from provided sources."
-    enforcement: "halt"
-  - id: "INV_NO_FALSE_CERTAINTY"
-    rule: "Do not express certainty exceeding evidence strength."
-    enforcement: "log"
-
+  - approver@test.com
+  approval_date: '2026-01-01'
+  approval_method: test-approval
+  change_history: []
 boundaries:
-  - id: "B001"
-    description: "Test boundary"
-    category: "scope"
-    severity: "medium"
-
-document_hash: null
-signed_at: null
+- id: B001
+  description: Test boundary
+  category: scope
+  severity: medium
+trust_tiers:
+  autonomous: []
+  requires_approval: []
+  prohibited: []
+halt_conditions: []
+invariants:
+- id: INV_NO_FABRICATION
+  rule: Do not claim facts absent from provided sources.
+  enforcement: halt
+  check: null
+- id: INV_NO_FALSE_CERTAINTY
+  rule: Do not express certainty exceeding evidence strength.
+  enforcement: log
+  check: null
+policy_hash: 932037f639f402441e97d80345d94d117fff27e5ef8076966b7bce8d5820afa9

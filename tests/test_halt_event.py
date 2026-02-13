@@ -127,7 +127,7 @@ class TestHaltEvent:
         """Receipt with both constitution and halt_event should verify."""
         constitution = ConstitutionProvenance(
             document_id="policy-v2",
-            document_hash=hash_text("content"),
+            policy_hash=hash_text("content"),
             version="2.0",
         )
         halt_event = make_halt_event()
@@ -218,7 +218,7 @@ class TestMiddlewareHaltEvent:
         receipt = exc_info.value.receipt
         assert receipt["halt_event"] is not None
         assert receipt["halt_event"]["halted"] is True
-        assert "C1" in receipt["halt_event"]["failed_checks"]
+        assert "sanna.context_contradiction" in receipt["halt_event"]["failed_checks"]
         assert receipt["halt_event"]["enforcement_mode"] == "halt"
 
     def test_halt_receipt_with_halt_event_verifies(self):

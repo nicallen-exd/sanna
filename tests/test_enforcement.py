@@ -13,6 +13,7 @@ Tests cover:
 """
 
 import json
+import tempfile
 import warnings
 import pytest
 from pathlib import Path
@@ -30,6 +31,7 @@ from sanna.constitution import (
     validate_constitution_data,
     compute_constitution_hash,
     sign_constitution,
+    save_constitution,
     constitution_to_receipt_ref,
     constitution_to_dict,
 )
@@ -62,9 +64,21 @@ WITH_CUSTOM_CONST = str(CONSTITUTIONS_DIR / "with_custom.yaml")
 NO_INVARIANTS_CONST = str(CONSTITUTIONS_DIR / "no_invariants.yaml")
 
 # Example constitutions from the Three Constitutions Demo
-STRICT_FINANCIAL = str(EXAMPLE_CONSTITUTIONS_DIR / "strict_financial_analyst.yaml")
-PERMISSIVE_SUPPORT = str(EXAMPLE_CONSTITUTIONS_DIR / "permissive_support_agent.yaml")
-RESEARCH_ASSISTANT = str(EXAMPLE_CONSTITUTIONS_DIR / "research_assistant.yaml")
+# These are unsigned on disk; sign to temp files for test use.
+_EXAMPLE_TMPDIR = tempfile.mkdtemp(prefix="sanna_test_examples_")
+
+def _sign_example(name: str) -> str:
+    """Load an unsigned example constitution, sign it, save to temp dir."""
+    source = str(EXAMPLE_CONSTITUTIONS_DIR / f"{name}.yaml")
+    const = load_constitution(source)
+    signed = sign_constitution(const)
+    dest = Path(_EXAMPLE_TMPDIR) / f"{name}.yaml"
+    save_constitution(signed, dest)
+    return str(dest)
+
+STRICT_FINANCIAL = _sign_example("strict_financial_analyst")
+PERMISSIVE_SUPPORT = _sign_example("permissive_support_agent")
+RESEARCH_ASSISTANT = _sign_example("research_assistant")
 
 # =============================================================================
 # TEST DATA
@@ -129,9 +143,15 @@ class TestInvariantCheckMap:
             assert isinstance(check_id, str)
             assert callable(check_fn)
 
-    def test_check_ids_are_c1_through_c5(self):
+    def test_check_ids_are_namespaced(self):
         check_ids = sorted(v[0] for v in INVARIANT_CHECK_MAP.values())
-        assert check_ids == ["C1", "C2", "C3", "C4", "C5"]
+        assert check_ids == [
+            "sanna.conflict_collapse",
+            "sanna.context_contradiction",
+            "sanna.false_certainty",
+            "sanna.premature_compression",
+            "sanna.unmarked_inference",
+        ]
 
 
 # =============================================================================
@@ -160,9 +180,10 @@ class TestConfigureChecks:
         configs, _ = configure_checks(const)
         assert len(configs) == 1
         cfg = configs[0]
-        assert cfg.check_id == "C1"
+        assert cfg.check_id == "sanna.context_contradiction"
         assert cfg.enforcement_level == "warn"
         assert cfg.triggered_by == "INV_NO_FABRICATION"
+        assert cfg.check_impl == "sanna.context_contradiction"
         assert callable(cfg.check_fn)
 
     def test_custom_invariant_becomes_record(self):
@@ -189,8 +210,8 @@ class TestConfigureChecks:
         configs, customs = configure_checks(const)
         assert len(configs) == 2
         assert len(customs) == 1
-        assert configs[0].check_id == "C1"
-        assert configs[1].check_id == "C4"
+        assert configs[0].check_id == "sanna.context_contradiction"
+        assert configs[1].check_id == "sanna.conflict_collapse"
         assert customs[0].invariant_id == "INV_CUSTOM_NO_PII"
 
     def test_no_invariants_empty_results(self):
@@ -209,7 +230,11 @@ class TestConfigureChecks:
         ])
         configs, _ = configure_checks(const)
         levels = {cfg.check_id: cfg.enforcement_level for cfg in configs}
-        assert levels == {"C1": "halt", "C2": "warn", "C3": "log"}
+        assert levels == {
+            "sanna.context_contradiction": "halt",
+            "sanna.unmarked_inference": "warn",
+            "sanna.false_certainty": "log",
+        }
 
     def test_single_invariant_produces_single_check(self):
         """Only one invariant → only one check runs."""
@@ -218,7 +243,7 @@ class TestConfigureChecks:
         ])
         configs, customs = configure_checks(const)
         assert len(configs) == 1
-        assert configs[0].check_id == "C1"
+        assert configs[0].check_id == "sanna.context_contradiction"
 
 
 # =============================================================================
@@ -368,8 +393,8 @@ class TestPerCheckEnforcement:
         receipt = exc_info.value.receipt
         # Should have all 5 checks in receipt
         assert len(receipt["checks"]) == 5
-        # C1 should have halt enforcement
-        c1 = next(c for c in receipt["checks"] if c["check_id"] == "C1")
+        # Context contradiction check should have halt enforcement
+        c1 = next(c for c in receipt["checks"] if c["check_id"] == "sanna.context_contradiction")
         assert c1["enforcement_level"] == "halt"
         assert not c1["passed"]
 
@@ -425,14 +450,14 @@ class TestReceiptFormat:
             assert "constitution_version" in check
 
     def test_receipt_version_constants(self):
-        """Receipt should use v0.6.0 version constants."""
+        """Receipt should use v0.6.2 version constants."""
         @sanna_observe(constitution_path=ALL_HALT_CONST)
         def agent(query: str, context: str) -> str:
             return SIMPLE_OUTPUT
 
         result = agent(query="test", context=SIMPLE_CONTEXT)
-        assert result.receipt["tool_version"] == "0.6.0"
-        assert result.receipt["checks_version"] == "2"
+        assert result.receipt["tool_version"] == "0.6.4"
+        assert result.receipt["checks_version"] == "4"
 
     def test_receipt_has_constitution_ref(self):
         """Receipt should include constitution_ref from constitution."""
@@ -444,7 +469,7 @@ class TestReceiptFormat:
         assert result.receipt["constitution_ref"] is not None
         ref = result.receipt["constitution_ref"]
         assert "document_id" in ref
-        assert "document_hash" in ref
+        assert "policy_hash" in ref
         assert "version" in ref
         assert "approved_by" in ref
 
@@ -598,8 +623,8 @@ class TestThreeConstitutions:
         receipt = exc_info.value.receipt
         assert receipt["coherence_status"] == "FAIL"
         assert receipt["halt_event"]["halted"] is True
-        # C1 should be the failed halt check
-        assert "C1" in receipt["halt_event"]["failed_checks"]
+        # Context contradiction should be the failed halt check
+        assert "sanna.context_contradiction" in receipt["halt_event"]["failed_checks"]
 
     def test_all_three_have_different_check_counts(self):
         """The three constitutions should run different numbers of checks."""
@@ -749,7 +774,7 @@ class TestNoConstitution:
 
 class TestVersionConstants:
     def test_tool_version(self):
-        assert TOOL_VERSION == "0.6.0"
+        assert TOOL_VERSION == "0.6.4"
 
     def test_checks_version(self):
-        assert CHECKS_VERSION == "2"
+        assert CHECKS_VERSION == "4"

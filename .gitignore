@@ -17,6 +17,13 @@ build/
 # Environment / secrets
 .env
 
+# Cryptographic key files
+*.pem
+*.key
+*.pub
+*.meta.json
+sanna_ed25519*
+
 # Test cache
 .pytest_cache/
 

@@ -1,40 +1,44 @@
-# Test constitution — all 5 standard invariants at WARN
-sanna_constitution: "1.0.0"
-
+sanna_constitution: 1.0.0
 identity:
-  agent_name: "test-all-warn"
-  domain: "testing"
-  description: "All standard invariants at warn enforcement"
-
+  agent_name: test-all-warn
+  domain: testing
+  description: All standard invariants at warn enforcement
 provenance:
-  authored_by: "tester@test.com"
+  authored_by: tester@test.com
   approved_by:
-    - "approver@test.com"
-  approval_date: "2026-01-01"
-  approval_method: "test-approval"
-
-invariants:
-  - id: "INV_NO_FABRICATION"
-    rule: "Do not claim facts absent from provided sources."
-    enforcement: "warn"
-  - id: "INV_MARK_INFERENCE"
-    rule: "Clearly mark inferences and speculation as such."
-    enforcement: "warn"
-  - id: "INV_NO_FALSE_CERTAINTY"
-    rule: "Do not express certainty exceeding evidence strength."
-    enforcement: "warn"
-  - id: "INV_PRESERVE_TENSION"
-    rule: "Do not collapse conflicting evidence."
-    enforcement: "warn"
-  - id: "INV_NO_PREMATURE_COMPRESSION"
-    rule: "Do not compress complex evidence prematurely."
-    enforcement: "warn"
-
+  - approver@test.com
+  approval_date: '2026-01-01'
+  approval_method: test-approval
+  change_history: []
 boundaries:
-  - id: "B001"
-    description: "Test boundary"
-    category: "scope"
-    severity: "medium"
-
-document_hash: null
-signed_at: null
+- id: B001
+  description: Test boundary
+  category: scope
+  severity: medium
+trust_tiers:
+  autonomous: []
+  requires_approval: []
+  prohibited: []
+halt_conditions: []
+invariants:
+- id: INV_NO_FABRICATION
+  rule: Do not claim facts absent from provided sources.
+  enforcement: warn
+  check: null
+- id: INV_MARK_INFERENCE
+  rule: Clearly mark inferences and speculation as such.
+  enforcement: warn
+  check: null
+- id: INV_NO_FALSE_CERTAINTY
+  rule: Do not express certainty exceeding evidence strength.
+  enforcement: warn
+  check: null
+- id: INV_PRESERVE_TENSION
+  rule: Do not collapse conflicting evidence.
+  enforcement: warn
+  check: null
+- id: INV_NO_PREMATURE_COMPRESSION
+  rule: Do not compress complex evidence prematurely.
+  enforcement: warn
+  check: null
+policy_hash: 9538d68833dbc7714f954d69dccb3eba5bde46d8376169d3477a481e9eee1aed

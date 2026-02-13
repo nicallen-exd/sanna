@@ -1,40 +1,44 @@
-# Test constitution — C1 at HALT, everything else at LOG
-sanna_constitution: "1.0.0"
-
+sanna_constitution: 1.0.0
 identity:
-  agent_name: "test-c1-halt"
-  domain: "testing"
-  description: "C1 halts, rest log"
-
+  agent_name: test-c1-halt
+  domain: testing
+  description: C1 halts, rest log
 provenance:
-  authored_by: "tester@test.com"
+  authored_by: tester@test.com
   approved_by:
-    - "approver@test.com"
-  approval_date: "2026-01-01"
-  approval_method: "test-approval"
-
-invariants:
-  - id: "INV_NO_FABRICATION"
-    rule: "Do not claim facts absent from provided sources."
-    enforcement: "halt"
-  - id: "INV_MARK_INFERENCE"
-    rule: "Clearly mark inferences and speculation as such."
-    enforcement: "log"
-  - id: "INV_NO_FALSE_CERTAINTY"
-    rule: "Do not express certainty exceeding evidence strength."
-    enforcement: "log"
-  - id: "INV_PRESERVE_TENSION"
-    rule: "Do not collapse conflicting evidence."
-    enforcement: "log"
-  - id: "INV_NO_PREMATURE_COMPRESSION"
-    rule: "Do not compress complex evidence prematurely."
-    enforcement: "log"
-
+  - approver@test.com
+  approval_date: '2026-01-01'
+  approval_method: test-approval
+  change_history: []
 boundaries:
-  - id: "B001"
-    description: "Test boundary"
-    category: "scope"
-    severity: "medium"
-
-document_hash: null
-signed_at: null
+- id: B001
+  description: Test boundary
+  category: scope
+  severity: medium
+trust_tiers:
+  autonomous: []
+  requires_approval: []
+  prohibited: []
+halt_conditions: []
+invariants:
+- id: INV_NO_FABRICATION
+  rule: Do not claim facts absent from provided sources.
+  enforcement: halt
+  check: null
+- id: INV_MARK_INFERENCE
+  rule: Clearly mark inferences and speculation as such.
+  enforcement: log
+  check: null
+- id: INV_NO_FALSE_CERTAINTY
+  rule: Do not express certainty exceeding evidence strength.
+  enforcement: log
+  check: null
+- id: INV_PRESERVE_TENSION
+  rule: Do not collapse conflicting evidence.
+  enforcement: log
+  check: null
+- id: INV_NO_PREMATURE_COMPRESSION
+  rule: Do not compress complex evidence prematurely.
+  enforcement: log
+  check: null
+policy_hash: ddebed2e7dd886624d0033658205e41424b99dece4c4273f9f07fad2c3fe01a3

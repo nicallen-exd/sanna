@@ -124,7 +124,7 @@ def main_generate():
 # VERIFY CLI
 # =============================================================================
 
-VERIFIER_VERSION = "0.2.0"
+VERIFIER_VERSION = "0.3.0"
 
 
 def format_verify_summary(result: VerificationResult, receipt: dict) -> str:
@@ -198,6 +198,9 @@ def main_verify():
     parser.add_argument("--format", choices=["summary", "json"], default="summary",
                        help="Output format (default: summary)")
     parser.add_argument("--schema", help="Path to schema file (optional, auto-detected)")
+    parser.add_argument("--public-key", help="Path to Ed25519 public key for receipt signature verification")
+    parser.add_argument("--constitution", help="Path to constitution file for chain verification")
+    parser.add_argument("--constitution-public-key", help="Path to Ed25519 public key for constitution signature verification")
     parser.add_argument("--version", action="version", version=f"sanna-verify {VERIFIER_VERSION}")
 
     args = parser.parse_args()
@@ -221,7 +224,12 @@ def main_verify():
         return 5
 
     # Verify
-    result = verify_receipt(receipt, schema)
+    result = verify_receipt(
+        receipt, schema,
+        public_key_path=args.public_key,
+        constitution_path=args.constitution,
+        constitution_public_key_path=args.constitution_public_key,
+    )
 
     # Output
     if args.format == "json":
@@ -261,19 +269,88 @@ def main_init_constitution():
     print("Next steps:")
     print(f"  1. Edit {output_path} with your agent's boundaries and governance details")
     print("  2. Get approval from your compliance/risk team")
-    print(f"  3. Sign it:  sanna-sign-constitution {output_path}")
+    print(f"  3. Sign it:  sanna-sign-constitution {output_path} --private-key sanna_ed25519.key")
     print(f'  4. Wire it:  @sanna_observe(constitution_path="{output_path}")')
+    return 0
+
+
+def main_hash_constitution():
+    """Entry point for sanna-hash-constitution command.
+
+    Computes policy_hash only (no Ed25519 cryptographic signature).
+    """
+    parser = argparse.ArgumentParser(
+        description="Validate and hash a Sanna constitution file (no Ed25519 signing)"
+    )
+    parser.add_argument("constitution", help="Path to constitution YAML/JSON file")
+    parser.add_argument("--output", "-o", help="Output file (default: overwrites input)")
+    parser.add_argument("--json", action="store_true", help="Output as JSON instead of YAML")
+    parser.add_argument("--version", action="version", version=f"sanna-hash-constitution {TOOL_VERSION}")
+
+    args = parser.parse_args()
+
+    from .constitution import (
+        load_constitution, sign_constitution, save_constitution,
+        SannaConstitutionError,
+    )
+
+    # Load and validate
+    try:
+        constitution = load_constitution(args.constitution, validate=True)
+    except SannaConstitutionError as e:
+        msg = str(e)
+        if "hash mismatch" in msg.lower():
+            print(f"Error: Constitution content does not match policy_hash. Re-hash with sanna-hash-constitution first.", file=sys.stderr)
+        elif "schema" in msg.lower():
+            print(f"Error: Constitution schema validation failed: {e}", file=sys.stderr)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print(f"Error: Constitution file not found: {args.constitution}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Error: Constitution missing required field: {e}", file=sys.stderr)
+        return 1
+
+    # Hash only (no Ed25519)
+    signed = sign_constitution(constitution)
+
+    # Determine output path
+    if args.output:
+        output_path = Path(args.output)
+    elif args.json:
+        output_path = Path(args.constitution).with_suffix(".json")
+    else:
+        output_path = Path(args.constitution)
+
+    if args.json:
+        output_path = output_path.with_suffix(".json")
+
+    save_constitution(signed, output_path)
+
+    print(f"Constitution hashed (NOT cryptographically signed).")
+    print(f"  File:       {output_path}")
+    print(f"  Agent:      {signed.identity.agent_name}")
+    print(f"  Hash:       {signed.policy_hash}")
+    print()
+    print("To add Ed25519 cryptographic signature:")
+    print(f"  sanna-sign-constitution {output_path} --private-key sanna_ed25519.key")
+
     return 0
 
 
 def main_sign_constitution():
     """Entry point for sanna-sign-constitution command."""
     parser = argparse.ArgumentParser(
-        description="Validate and sign a Sanna constitution file"
+        description="Validate and sign a Sanna constitution file with Ed25519"
     )
     parser.add_argument("constitution", help="Path to constitution YAML/JSON file")
     parser.add_argument("--output", "-o", help="Output file (default: overwrites input)")
     parser.add_argument("--json", action="store_true", help="Output as JSON instead of YAML")
+    parser.add_argument("--private-key", required=True,
+                       help="Path to Ed25519 private key for cryptographic signing (required)")
+    parser.add_argument("--signed-by", help="Identity of the signer (e.g., email)")
     parser.add_argument("--verify-only", action="store_true",
                        help="Validate and show summary without signing")
     parser.add_argument("--version", action="version", version=f"sanna-sign-constitution {TOOL_VERSION}")
@@ -282,18 +359,27 @@ def main_sign_constitution():
 
     from .constitution import (
         load_constitution, sign_constitution, save_constitution,
-        constitution_to_receipt_ref, constitution_to_dict,
+        constitution_to_receipt_ref, constitution_to_dict, SannaConstitutionError,
     )
 
-    # Load and validate
+    # Load and validate (bypass hash check for unsigned constitutions)
     try:
-        constitution = load_constitution(args.constitution)
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        constitution = load_constitution(args.constitution, validate=True)
+    except SannaConstitutionError as e:
+        msg = str(e)
+        if "hash mismatch" in msg.lower():
+            print(f"Error: Constitution content does not match policy_hash. Re-hash with sanna-hash-constitution first.", file=sys.stderr)
+        elif "schema" in msg.lower():
+            print(f"Error: Constitution schema validation failed: {e}", file=sys.stderr)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print(f"Error: Constitution file not found: {args.constitution}", file=sys.stderr)
         return 1
     except ValueError as e:
-        print(f"Validation error: {e}", file=sys.stderr)
-        return 2
+        print(f"Error: Constitution missing required field: {e}", file=sys.stderr)
+        return 1
 
     if args.verify_only:
         print("=" * 50)
@@ -307,9 +393,14 @@ def main_sign_constitution():
         print(f"  Method:     {constitution.provenance.approval_method}")
         print(f"  Boundaries: {len(constitution.boundaries)}")
         print(f"  Halt rules: {len(constitution.halt_conditions)}")
-        if constitution.document_hash:
-            print(f"  Hash:       {constitution.document_hash}")
-            print(f"  Signed at:  {constitution.signed_at}")
+        print(f"  Invariants: {len(constitution.invariants)}")
+        if constitution.policy_hash:
+            print(f"  Hash:       {constitution.policy_hash}")
+            sig = constitution.provenance.signature
+            if sig and sig.value:
+                print(f"  Key ID:     {sig.key_id}")
+                print(f"  Signed by:  {sig.signed_by}")
+                print(f"  Scheme:     {sig.scheme}")
         else:
             print("  Status:     UNSIGNED")
         print("=" * 50)
@@ -317,8 +408,12 @@ def main_sign_constitution():
         print("Validation: PASSED")
         return 0
 
-    # Sign
-    signed = sign_constitution(constitution)
+    # Sign with Ed25519
+    signed = sign_constitution(
+        constitution,
+        private_key_path=args.private_key,
+        signed_by=args.signed_by,
+    )
 
     # Determine output path and format
     if args.output:
@@ -333,11 +428,15 @@ def main_sign_constitution():
 
     save_constitution(signed, output_path)
 
+    sig = signed.provenance.signature
     print(f"Signed constitution written to {output_path}")
     print()
     print(f"  Agent:     {signed.identity.agent_name}")
-    print(f"  Hash:      {signed.document_hash}")
-    print(f"  Signed at: {signed.signed_at}")
+    print(f"  Hash:      {signed.policy_hash}")
+    if sig and sig.value:
+        print(f"  Key ID:    {sig.key_id}")
+        print(f"  Signed by: {sig.signed_by}")
+        print(f"  Scheme:    {sig.scheme}")
     print(f"  Approvers: {', '.join(signed.provenance.approved_by)}")
     print()
     print("Receipt reference preview:")
@@ -346,6 +445,105 @@ def main_sign_constitution():
     print()
     print("Next step:")
     print(f'  @sanna_observe(constitution_path="{output_path}")')
+
+    return 0
+
+
+def main_keygen():
+    """Entry point for sanna-keygen command."""
+    parser = argparse.ArgumentParser(
+        description="Generate Ed25519 keypair for Sanna constitution and receipt signing"
+    )
+    parser.add_argument("--output-dir", "-o", default=".",
+                       help="Directory for key files (default: current directory)")
+    parser.add_argument("--signed-by", help="Human-readable identity label (writes meta.json alongside keypair)")
+    parser.add_argument("--version", action="version", version=f"sanna-keygen {TOOL_VERSION}")
+
+    args = parser.parse_args()
+
+    from .crypto import generate_keypair
+
+    private_path, public_path = generate_keypair(
+        args.output_dir,
+        signed_by=args.signed_by,
+        write_metadata=bool(args.signed_by),
+    )
+
+    print(f"Ed25519 keypair generated:")
+    print(f"  Private key: {private_path}")
+    print(f"  Public key:  {public_path}")
+    if args.signed_by:
+        meta_path = Path(args.output_dir) / "sanna_ed25519.meta.json"
+        print(f"  Metadata:    {meta_path}")
+        print(f"  Identity:    {args.signed_by}")
+    print()
+    print("Usage:")
+    print(f"  sanna-sign-constitution constitution.yaml --private-key {private_path}")
+    print(f"  sanna-verify-constitution constitution.yaml --public-key {public_path}")
+    print()
+    print("IMPORTANT: Keep the private key secure. Share only the public key.")
+
+    return 0
+
+
+def main_verify_constitution():
+    """Entry point for sanna-verify-constitution command."""
+    parser = argparse.ArgumentParser(
+        description="Verify a Sanna constitution's integrity and signature"
+    )
+    parser.add_argument("constitution", help="Path to constitution YAML/JSON file")
+    parser.add_argument("--public-key", help="Path to Ed25519 public key for signature verification")
+    parser.add_argument("--version", action="version", version=f"sanna-verify-constitution {TOOL_VERSION}")
+
+    args = parser.parse_args()
+
+    from .constitution import load_constitution, compute_constitution_hash, SannaConstitutionError
+
+    # Load and validate
+    try:
+        constitution = load_constitution(args.constitution)
+    except SannaConstitutionError as e:
+        print(f"FAILED: {e}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Validation error: {e}", file=sys.stderr)
+        return 2
+
+    if not constitution.policy_hash:
+        print("FAILED: Constitution is not signed (no policy_hash).", file=sys.stderr)
+        return 1
+
+    # Verify hash
+    computed = compute_constitution_hash(constitution)
+    if computed != constitution.policy_hash:
+        print(f"FAILED: Hash mismatch. File has been modified since signing.", file=sys.stderr)
+        return 1
+
+    print(f"Hash:     VALID ({constitution.policy_hash[:16]}...)")
+
+    # Verify Ed25519 signature if public key provided
+    if args.public_key:
+        sig = constitution.provenance.signature
+        if not sig or not sig.value:
+            print("FAILED: Constitution has no Ed25519 signature.", file=sys.stderr)
+            return 1
+
+        from .crypto import verify_constitution_full
+        valid = verify_constitution_full(constitution, args.public_key)
+        if not valid:
+            print("Signature: FAILED — signature does not match public key.", file=sys.stderr)
+            return 1
+        print(f"Signature: VALID (key_id={sig.key_id}, scheme={sig.scheme})")
+    else:
+        sig = constitution.provenance.signature
+        if sig and sig.value:
+            print(f"Signature: PRESENT (key_id={sig.key_id}) — provide --public-key to verify")
+
+    print(f"Agent:    {constitution.identity.agent_name}")
+    print(f"Status:   VERIFIED")
 
     return 0
 

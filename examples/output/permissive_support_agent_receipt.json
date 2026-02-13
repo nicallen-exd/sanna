@@ -1,11 +1,11 @@
 {
   "schema_version": "0.1",
-  "tool_version": "0.6.0",
-  "checks_version": "2",
-  "receipt_id": "17ebff7ac80054ac",
-  "receipt_fingerprint": "4a6eae2ad1081d1a",
-  "trace_id": "sanna-fe8f62583ada",
-  "timestamp": "2026-02-13T00:49:07.419485+00:00",
+  "tool_version": "0.6.4",
+  "checks_version": "4",
+  "receipt_id": "e782ea31d3de62ff",
+  "receipt_fingerprint": "7c23cea1bf9fab0a",
+  "trace_id": "sanna-9e14eb173113",
+  "timestamp": "2026-02-13T06:05:48.239877+00:00",
   "inputs": {
     "query": "Can I get a refund on my software purchase?",
     "context": "Our refund policy: Physical products can be returned within 30 days. Digital products are non-refundable once downloaded. Subscriptions can be cancelled anytime. If the product is defective, exceptions may apply. However, all exceptions require manager approval."
@@ -23,7 +23,7 @@
   },
   "checks": [
     {
-      "check_id": "C1",
+      "check_id": "sanna.context_contradiction",
       "name": "Context Contradiction",
       "passed": false,
       "severity": "critical",
@@ -31,10 +31,12 @@
       "details": "Output may contradict provided context.",
       "triggered_by": "INV_NO_FABRICATION",
       "enforcement_level": "warn",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.context_contradiction",
+      "replayable": true
     },
     {
-      "check_id": "C4",
+      "check_id": "sanna.conflict_collapse",
       "name": "Preserve Tensions",
       "passed": true,
       "severity": "info",
@@ -42,7 +44,9 @@
       "details": "No obvious conflict collapse detected (heuristic check)",
       "triggered_by": "INV_PRESERVE_TENSION",
       "enforcement_level": "warn",
-      "constitution_version": "1.0.0"
+      "constitution_version": "1.0.0",
+      "check_impl": "sanna.conflict_collapse",
+      "replayable": true
     },
     {
       "check_id": "INV_CUSTOM_NO_COMPETITORS",
@@ -55,21 +59,34 @@
       "enforcement_level": "warn",
       "constitution_version": "1.0.0",
       "status": "NOT_CHECKED",
-      "reason": "Custom invariant \u2014 no evaluator registered."
+      "reason": "Custom invariant \u2014 no evaluator registered.",
+      "check_impl": null,
+      "replayable": false
     }
   ],
   "checks_passed": 1,
   "checks_failed": 1,
   "coherence_status": "FAIL",
+  "evaluation_coverage": {
+    "total_invariants": 3,
+    "evaluated": 2,
+    "not_checked": 1,
+    "coverage_basis_points": 6666
+  },
   "constitution_ref": {
     "document_id": "permissive-support-agent/1.0.0",
-    "document_hash": "d111f7e4044f12cc45e61262ba9e1a69af3e66db0948c3ad9e43eb744df42926",
+    "policy_hash": "8d8f9d5f57e6b7ff94e5013348aaa445039b2a0f5b07233c56d2fe6af52933bb",
     "version": "1.0.0",
     "approved_by": [
       "cs-director@company.com"
     ],
     "approval_date": "2026-01-15",
-    "approval_method": "manual-sign-off"
+    "approval_method": "manual-sign-off",
+    "signature": "CcmOqkzMUue+Z0+4MJKWnEKj7mByNaSr4Xqh9HAZLU7sisXC0rvzHV0XD6FtM9JFyvdEUmZRo9x2mivcUkt4DA==",
+    "key_id": "c6e4d69a08ab3eaf6c3ed91994a2a7fba302d753782a1dd2b64e1fd7835409ba",
+    "signed_by": "sanna-demo",
+    "signed_at": "2026-02-13T06:05:48.229084+00:00",
+    "scheme": "constitution_sig_v1"
   },
   "halt_event": null,
   "extensions": {
@@ -80,5 +97,12 @@
       "function_name": "agent",
       "execution_time_ms": 0
     }
+  },
+  "receipt_signature": {
+    "signature": "EeWyjpNZFat9gLntczwFrN0QmeNh8kv8Nt7TlODEF/TuovBY2uENPD5pabluCHvbI+vVDVsu6iHt4bicc6XwBQ==",
+    "key_id": "c6e4d69a08ab3eaf6c3ed91994a2a7fba302d753782a1dd2b64e1fd7835409ba",
+    "signed_by": "",
+    "signed_at": "2026-02-13T06:05:48.240092+00:00",
+    "scheme": "receipt_sig_v1"
   }
 }

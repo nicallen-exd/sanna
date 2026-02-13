@@ -6,6 +6,10 @@ load, parse, validate, sign (hash), convert to receipt reference, scaffold.
 
 The constitution captures governance provenance: who defined the agent's
 boundaries, what those boundaries are, and who approved them.
+
+v0.6.3: Constitution signature covers the full document (not just the hash).
+Signature metadata lives in provenance.signature.  ``document_hash`` is
+renamed to ``policy_hash`` everywhere.
 """
 
 from __future__ import annotations
@@ -17,6 +21,15 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+
+# =============================================================================
+# EXCEPTIONS
+# =============================================================================
+
+class SannaConstitutionError(Exception):
+    """Raised when a constitution fails integrity checks."""
+    pass
 
 
 # =============================================================================
@@ -63,12 +76,28 @@ class TrustTiers:
 
 
 @dataclass
+class ConstitutionSignature:
+    """Ed25519 signature block for a constitution document.
+
+    Lives at ``provenance.signature`` in the constitution.  The ``value``
+    field is excluded from the signed material (set to ``""`` during
+    signing / verification).
+    """
+    value: Optional[str] = None        # Base64 Ed25519 signature
+    key_id: Optional[str] = None       # SHA-256 fingerprint of signing public key (64 hex)
+    signed_by: Optional[str] = None    # Identity of the signer
+    signed_at: Optional[str] = None    # ISO 8601 timestamp
+    scheme: str = "constitution_sig_v1"
+
+
+@dataclass
 class Provenance:
     authored_by: str
     approved_by: list[str]
     approval_date: str
     approval_method: str
     change_history: list[dict[str, str]] = field(default_factory=list)
+    signature: Optional[ConstitutionSignature] = None
 
 
 @dataclass
@@ -83,6 +112,7 @@ class Invariant:
     id: str           # INV_NO_FABRICATION, INV_CUSTOM_*, etc.
     rule: str         # Human-readable description
     enforcement: str  # "halt" | "warn" | "log"
+    check: Optional[str] = None  # Optional check impl ID (e.g., "sanna.context_contradiction")
 
 
 @dataclass
@@ -94,8 +124,7 @@ class Constitution:
     trust_tiers: TrustTiers = field(default_factory=TrustTiers)
     halt_conditions: list[HaltCondition] = field(default_factory=list)
     invariants: list[Invariant] = field(default_factory=list)
-    document_hash: Optional[str] = None
-    signed_at: Optional[str] = None
+    policy_hash: Optional[str] = None
 
 
 # =============================================================================
@@ -240,12 +269,26 @@ def parse_constitution(data: dict) -> Constitution:
     approved_by = prov_data["approved_by"]
     if isinstance(approved_by, str):
         approved_by = [approved_by]
+
+    # Parse nested signature block if present
+    sig_data = prov_data.get("signature")
+    prov_signature = None
+    if isinstance(sig_data, dict):
+        prov_signature = ConstitutionSignature(
+            value=sig_data.get("value"),
+            key_id=sig_data.get("key_id"),
+            signed_by=sig_data.get("signed_by"),
+            signed_at=sig_data.get("signed_at"),
+            scheme=sig_data.get("scheme", "constitution_sig_v1"),
+        )
+
     provenance = Provenance(
         authored_by=prov_data["authored_by"],
         approved_by=approved_by,
         approval_date=str(prov_data["approval_date"]),
         approval_method=prov_data["approval_method"],
         change_history=prov_data.get("change_history", []),
+        signature=prov_signature,
     )
 
     boundaries = [
@@ -284,6 +327,7 @@ def parse_constitution(data: dict) -> Constitution:
             id=inv["id"],
             rule=inv["rule"],
             enforcement=inv["enforcement"],
+            check=inv.get("check"),
         )
         for inv in data.get("invariants", [])
     ]
@@ -296,8 +340,7 @@ def parse_constitution(data: dict) -> Constitution:
         trust_tiers=trust_tiers,
         halt_conditions=halt_conditions,
         invariants=invariants,
-        document_hash=data.get("document_hash"),
-        signed_at=data.get("signed_at"),
+        policy_hash=data.get("policy_hash"),
     )
 
 
@@ -345,19 +388,102 @@ def compute_constitution_hash(constitution: Constitution) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def sign_constitution(constitution: Constitution) -> Constitution:
-    """Return new Constitution with document_hash and signed_at set."""
-    doc_hash = compute_constitution_hash(constitution)
+def constitution_to_signable_dict(constitution: Constitution) -> dict:
+    """Build the canonical dict that gets Ed25519-signed.
+
+    Includes the full document (identity, provenance with signature block,
+    boundaries, trust_tiers, halt_conditions, invariants, policy_hash).
+    The only exclusion is ``provenance.signature.value`` which is set to
+    ``""`` in the signable representation.
+    """
+    prov_dict = {
+        "authored_by": constitution.provenance.authored_by,
+        "approved_by": constitution.provenance.approved_by,
+        "approval_date": constitution.provenance.approval_date,
+        "approval_method": constitution.provenance.approval_method,
+        "change_history": constitution.provenance.change_history,
+    }
+
+    # Include signature block with value blanked out
+    sig = constitution.provenance.signature
+    if sig is not None:
+        prov_dict["signature"] = {
+            "value": "",  # excluded from signing
+            "key_id": sig.key_id,
+            "signed_by": sig.signed_by,
+            "signed_at": sig.signed_at,
+            "scheme": sig.scheme,
+        }
+    else:
+        prov_dict["signature"] = None
+
+    return {
+        "schema_version": constitution.schema_version,
+        "identity": asdict(constitution.identity),
+        "provenance": prov_dict,
+        "boundaries": [asdict(b) for b in constitution.boundaries],
+        "trust_tiers": asdict(constitution.trust_tiers),
+        "halt_conditions": [asdict(h) for h in constitution.halt_conditions],
+        "invariants": [asdict(inv) for inv in constitution.invariants],
+        "policy_hash": constitution.policy_hash,
+    }
+
+
+def sign_constitution(
+    constitution: Constitution,
+    private_key_path: Optional[str] = None,
+    signed_by: Optional[str] = None,
+) -> Constitution:
+    """Return new Constitution with policy_hash (and optional Ed25519 signature).
+
+    Args:
+        constitution: The constitution to sign.
+        private_key_path: Optional path to Ed25519 private key for cryptographic signing.
+        signed_by: Optional identity of the signer.
+    """
+    policy_hash = compute_constitution_hash(constitution)
+
+    prov_signature = None
+
+    if private_key_path is not None:
+        from .crypto import sign_constitution_full
+        # Build a constitution with policy_hash set but no signature yet,
+        # so sign_constitution_full can build the signable dict.
+        pre_signed = Constitution(
+            schema_version=constitution.schema_version,
+            identity=constitution.identity,
+            provenance=Provenance(
+                authored_by=constitution.provenance.authored_by,
+                approved_by=constitution.provenance.approved_by,
+                approval_date=constitution.provenance.approval_date,
+                approval_method=constitution.provenance.approval_method,
+                change_history=constitution.provenance.change_history,
+                signature=None,  # will be filled in by sign_constitution_full
+            ),
+            boundaries=constitution.boundaries,
+            trust_tiers=constitution.trust_tiers,
+            halt_conditions=constitution.halt_conditions,
+            invariants=constitution.invariants,
+            policy_hash=policy_hash,
+        )
+        prov_signature = sign_constitution_full(pre_signed, private_key_path, signed_by=signed_by)
+
     return Constitution(
         schema_version=constitution.schema_version,
         identity=constitution.identity,
-        provenance=constitution.provenance,
+        provenance=Provenance(
+            authored_by=constitution.provenance.authored_by,
+            approved_by=constitution.provenance.approved_by,
+            approval_date=constitution.provenance.approval_date,
+            approval_method=constitution.provenance.approval_method,
+            change_history=constitution.provenance.change_history,
+            signature=prov_signature,
+        ),
         boundaries=constitution.boundaries,
         trust_tiers=constitution.trust_tiers,
         halt_conditions=constitution.halt_conditions,
         invariants=constitution.invariants,
-        document_hash=doc_hash,
-        signed_at=datetime.now(timezone.utc).isoformat(),
+        policy_hash=policy_hash,
     )
 
 
@@ -368,28 +494,41 @@ def sign_constitution(constitution: Constitution) -> Constitution:
 def constitution_to_receipt_ref(constitution: Constitution) -> dict:
     """Convert signed constitution to receipt's constitution_ref format.
 
-    Raises ValueError if not signed.
-    Returns: {document_id, document_hash, version, approved_by, approval_date, approval_method}
+    Raises ValueError if not signed (no policy_hash).
     """
-    if not constitution.document_hash:
+    if not constitution.policy_hash:
         raise ValueError("Constitution must be signed before binding to a receipt. Call sign_constitution() first.")
 
-    return {
+    ref = {
         "document_id": f"{constitution.identity.agent_name}/{constitution.schema_version}",
-        "document_hash": constitution.document_hash,
+        "policy_hash": constitution.policy_hash,
         "version": constitution.schema_version,
         "approved_by": constitution.provenance.approved_by,
         "approval_date": constitution.provenance.approval_date,
         "approval_method": constitution.provenance.approval_method,
     }
+    sig = constitution.provenance.signature
+    if sig is not None and sig.value is not None:
+        ref["signature"] = sig.value
+        ref["key_id"] = sig.key_id
+        ref["signed_by"] = sig.signed_by
+        ref["signed_at"] = sig.signed_at
+        ref["scheme"] = sig.scheme
+    return ref
 
 
 # =============================================================================
 # FILE I/O
 # =============================================================================
 
-def load_constitution(path: str | Path) -> Constitution:
-    """Load from .yaml/.yml/.json file. Validates on load."""
+def load_constitution(path: str | Path, validate: bool = False) -> Constitution:
+    """Load from .yaml/.yml/.json file. Validates on load.
+
+    Args:
+        path: Path to constitution file.
+        validate: If True, validate against the JSON schema before parsing.
+            Raises SannaConstitutionError on schema violation.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Constitution file not found: {path}")
@@ -406,7 +545,48 @@ def load_constitution(path: str | Path) -> Constitution:
     if not isinstance(data, dict):
         raise ValueError(f"Constitution file must contain a YAML/JSON object, got {type(data).__name__}")
 
-    return parse_constitution(data)
+    if validate:
+        schema_errors = validate_against_schema(data)
+        if schema_errors:
+            raise SannaConstitutionError(
+                f"Constitution schema validation failed: {'; '.join(schema_errors)}"
+            )
+
+    constitution = parse_constitution(data)
+
+    # Verify hash integrity if constitution is signed
+    if constitution.policy_hash:
+        computed = compute_constitution_hash(constitution)
+        if computed != constitution.policy_hash:
+            raise SannaConstitutionError(
+                f"Constitution hash mismatch: file has been modified since signing. "
+                f"Expected {constitution.policy_hash[:16]}..., got {computed[:16]}... "
+                f"Re-sign with: sanna-sign-constitution {path}"
+            )
+
+    return constitution
+
+
+def validate_against_schema(data: dict) -> list[str]:
+    """Validate a constitution data dict against the JSON schema.
+
+    Returns list of error strings. Empty list = valid.
+    """
+    from jsonschema import validate as jschema_validate, ValidationError
+
+    schema_path = Path(__file__).parent / "spec" / "constitution.schema.json"
+    with open(schema_path) as f:
+        schema = json.load(f)
+
+    errors = []
+    try:
+        jschema_validate(data, schema)
+    except ValidationError as e:
+        msg = f"Schema validation failed: {e.message}"
+        if e.path:
+            msg += f" (at {'.'.join(str(p) for p in e.path)})"
+        errors.append(msg)
+    return errors
 
 
 def constitution_to_dict(constitution: Constitution) -> dict:
@@ -416,14 +596,32 @@ def constitution_to_dict(constitution: Constitution) -> dict:
     """
     result = {"sanna_constitution": constitution.schema_version}
     result["identity"] = asdict(constitution.identity)
-    result["provenance"] = asdict(constitution.provenance)
+
+    # Build provenance dict with nested signature block
+    prov_dict = {
+        "authored_by": constitution.provenance.authored_by,
+        "approved_by": constitution.provenance.approved_by,
+        "approval_date": constitution.provenance.approval_date,
+        "approval_method": constitution.provenance.approval_method,
+        "change_history": constitution.provenance.change_history,
+    }
+    sig = constitution.provenance.signature
+    if sig is not None:
+        prov_dict["signature"] = {
+            "value": sig.value,
+            "key_id": sig.key_id,
+            "signed_by": sig.signed_by,
+            "signed_at": sig.signed_at,
+            "scheme": sig.scheme,
+        }
+    result["provenance"] = prov_dict
+
     result["boundaries"] = [asdict(b) for b in constitution.boundaries]
     result["trust_tiers"] = asdict(constitution.trust_tiers)
     result["halt_conditions"] = [asdict(h) for h in constitution.halt_conditions]
     if constitution.invariants:
         result["invariants"] = [asdict(inv) for inv in constitution.invariants]
-    result["document_hash"] = constitution.document_hash
-    result["signed_at"] = constitution.signed_at
+    result["policy_hash"] = constitution.policy_hash
     return result
 
 
@@ -457,7 +655,7 @@ _SCAFFOLD_TEMPLATE = """\
 # Workflow:
 #   1. Edit this file with your agent's specific constraints
 #   2. Get approval from your compliance/risk team
-#   3. Sign it:  sanna-sign-constitution constitution.yaml
+#   3. Sign it:  sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
 #   4. Wire it into your agent:
 #        @sanna_observe(constitution_path="constitution.yaml")
 
@@ -502,9 +700,21 @@ halt_conditions:
     severity: "critical"
     enforcement: "halt"
 
-# These fields are set by `sanna-sign-constitution` — do not edit manually:
-document_hash: null
-signed_at: null
+invariants:
+  # Each invariant maps to a coherence check.
+  # Standard IDs: INV_NO_FABRICATION, INV_MARK_INFERENCE, INV_NO_FALSE_CERTAINTY,
+  #               INV_PRESERVE_TENSION, INV_NO_PREMATURE_COMPRESSION
+  # Custom IDs:   INV_CUSTOM_* (appear in receipt as NOT_CHECKED)
+  # Enforcement:  halt (stop execution), warn (continue with warning), log (record only)
+  - id: "INV_NO_FABRICATION"
+    rule: "Do not claim facts absent from provided sources."
+    enforcement: "halt"
+  - id: "INV_MARK_INFERENCE"
+    rule: "Clearly mark inferences and speculation as such."
+    enforcement: "warn"
+
+# This field is set by `sanna-sign-constitution` — do not edit manually:
+policy_hash: null
 """
 
 

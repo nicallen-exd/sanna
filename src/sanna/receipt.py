@@ -15,9 +15,9 @@ from .hashing import hash_text, hash_obj
 # VERSION CONSTANTS
 # =============================================================================
 
-TOOL_VERSION = "0.6.0"
+TOOL_VERSION = "0.6.4"
 SCHEMA_VERSION = "0.1"
-CHECKS_VERSION = "2"  # Incremented: constitution-driven enforcement
+CHECKS_VERSION = "4"  # C4 contraction fix, coverage_basis_points, RFC 8785 float guard
 
 
 # =============================================================================
@@ -48,7 +48,7 @@ class FinalAnswerProvenance:
 class ConstitutionProvenance:
     """Provenance of the constitution/policy document that defined check boundaries."""
     document_id: str
-    document_hash: str  # SHA256 hash of the constitution content
+    policy_hash: str  # SHA256 hash of the constitution content
     version: Optional[str] = None
     source: Optional[str] = None  # e.g., "policy-repo", "compliance-api"
 
@@ -381,12 +381,17 @@ def check_c4_conflict_collapse(context: str, output: str, enforcement: str = "wa
             details="Insufficient data for conflict check"
         )
 
+    import re as _re
+
     context_lower = context.lower()
     output_lower = output.lower()
 
     # Pattern: Context has both permissive and restrictive rules
-    has_permissive = any(p in context_lower for p in ["can", "eligible", "allowed", "permitted"])
-    has_restrictive = any(r in context_lower for r in ["non-refundable", "cannot", "not allowed", "prohibited", "require"])
+    # Use word-boundary matching to avoid substring collisions (e.g., "can" inside "cannot")
+    _permissive_terms = [r"\bcan(?!'t)\b", r"\beligible\b", r"\ballowed\b", r"\bpermitted\b"]
+    _restrictive_terms = [r"\bnon-refundable\b", r"\bcannot\b", r"\bnot allowed\b", r"\bprohibited\b", r"\brequire\b"]
+    has_permissive = any(_re.search(p, context_lower) for p in _permissive_terms)
+    has_restrictive = any(_re.search(r, context_lower) for r in _restrictive_terms)
 
     if has_permissive and has_restrictive:
         acknowledges_tension = any(t in output_lower for t in
@@ -421,8 +426,11 @@ def check_c5_premature_compression(context: str, output: str, enforcement: str =
             details="Insufficient data for compression check"
         )
 
+    import re as _re
+
     # Count distinct policy points in context
-    context_bullets = context.count("-") + context.count("•") + context.count("\n")
+    # Only count bullet-point hyphens (line-start), not hyphens in words like "non-refundable"
+    context_bullets = len(_re.findall(r'(?:^|\n)\s*[-•]', context))
     context_sentences = context.count(".") + context.count("!")
     context_complexity = max(context_bullets, context_sentences)
 
