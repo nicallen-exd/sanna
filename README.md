@@ -1,147 +1,194 @@
 # Sanna
 
-AI governance infrastructure that generates cryptographically signed "reasoning receipts" — portable JSON artifacts that document AI agent decisions and verify reasoning integrity offline. Constitutions define the rules. Checks enforce them. Receipts prove it happened. The name means "truth" in Swedish.
+Truth infrastructure for AI agents. Checks reasoning during execution, halts when constraints are violated, generates portable receipts proving governance was enforced.
+
+Observability tools show you what happened. Guardrails filter I/O. Sanna proves the reasoning held together — and gives you a portable receipt you can verify offline, hand to an auditor, or use in court.
+
+## Install
 
 ```bash
-pip install sanna
+pip install sanna                # core library
+pip install sanna[mcp]           # MCP server for Claude Desktop / Cursor
+pip install sanna[otel]          # OpenTelemetry bridge
+pip install sanna[langfuse]      # Langfuse adapter
 ```
 
-## How It Works
+Requires Python 3.10+.
 
-### 1. Define a constitution
+## Quickstart
 
-A constitution is a YAML file that declares which reasoning invariants your agent must uphold, what actions it can take, and what happens when rules are violated.
+**1. Generate a constitution**
+
+```bash
+sanna-init
+```
+
+This walks you through template selection (Enterprise IT, Customer-Facing, or General Purpose), agent identity, and enforcement levels. It produces a YAML file ready for signing.
+
+Or write one manually:
 
 ```yaml
 # constitution.yaml
 sanna_constitution: "1.0.0"
 
 identity:
-  agent_name: "support-agent"
+  agent_name: "my-agent"
   domain: "customer-service"
 
 provenance:
-  authored_by: "cs-team@company.com"
-  approved_by:
-    - "cs-director@company.com"
-  approval_date: "2026-01-15"
-  approval_method: "compliance-review"
+  authored_by: "team@company.com"
+  approved_by: ["lead@company.com"]
+  approval_date: "2026-02-13"
+  approval_method: "manual-sign-off"
+
+boundaries:
+  - id: "B001"
+    description: "Only answer product questions"
+    category: "scope"
+    severity: "high"
 
 invariants:
   - id: "INV_NO_FABRICATION"
     rule: "Do not claim facts absent from provided sources."
     enforcement: "halt"
   - id: "INV_MARK_INFERENCE"
-    rule: "Clearly mark inferences and speculation as such."
+    rule: "Clearly mark inferences and speculation."
     enforcement: "warn"
 
-boundaries:
-  - id: "B001"
-    description: "Only answer product and service questions"
-    category: "scope"
-    severity: "high"
-
-authority_boundaries:
-  cannot_execute:
-    - "delete_records"
-    - "send_email"
-  must_escalate:
-    - condition: "refund amount exceeds threshold"
-      target:
-        type: "log"
-  can_execute:
-    - "query_database"
-    - "generate_report"
-
-trusted_sources:
-  tier_1:
-    - "internal_database"
-  tier_2:
-    - "partner_api"
-  tier_3:
-    - "web_search"
-  untrusted:
-    - "user_paste"
+policy_hash: null
 ```
 
-Each invariant maps to a coherence check. The `enforcement` field controls what happens when that check fails — `halt` stops execution, `warn` emits a Python warning, `log` records silently.
-
-### 2. Sign it
+**2. Sign it**
 
 ```bash
-sanna-keygen --signed-by "your-name@company.com"
+sanna-keygen --signed-by "team@company.com"
 sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
 ```
 
-Constitutions are Ed25519-signed. The signature covers the full document — identity, provenance, invariants, authority boundaries, trusted sources, and signer metadata.
-
-### 3. Wrap your agent function
+**3. Wrap your agent function**
 
 ```python
 from sanna import sanna_observe, SannaHaltError
 
-@sanna_observe(
-    constitution_path="constitution.yaml",
-    private_key_path="sanna_ed25519.key",
-)
-def support_agent(query: str, context: str) -> str:
-    return llm.generate(query=query, context=context)
+@sanna_observe(constitution_path="constitution.yaml")
+def my_agent(query: str, context: str) -> str:
+    return "Based on the data, revenue grew 12% year-over-year."
 
 try:
-    result = support_agent(
-        query="Can I get a refund on my software?",
-        context="Digital products are non-refundable once downloaded."
+    result = my_agent(
+        query="What was revenue growth?",
+        context="Annual report: revenue increased 12% YoY to $4.2B."
     )
-    print(result.output)          # The agent's response
-    print(result.receipt)         # The reasoning receipt (dict)
+    print(result.output)   # the agent's response
+    print(result.receipt)  # the reasoning receipt (dict)
 except SannaHaltError as e:
     print(f"HALTED: {e}")
-    print(e.receipt)              # Receipt is still available
+    print(e.receipt)       # receipt is still generated on halt
 ```
 
-The constitution drives enforcement at runtime. Only invariants listed in the constitution are evaluated. Each check enforces independently — halt, warn, or log.
-
-### 4. Verify offline
+**4. Verify offline**
 
 ```bash
 sanna-verify receipt.json
 sanna-verify receipt.json --public-key sanna_ed25519.pub
-sanna-verify receipt.json --constitution constitution.yaml --constitution-public-key sanna_ed25519.pub
+sanna-verify receipt.json \
+  --constitution constitution.yaml \
+  --constitution-public-key sanna_ed25519.pub
 ```
 
-No network. No API keys. No platform access. Full chain verification: receipt integrity, Ed25519 signature, receipt-to-constitution provenance bond, constitution signature.
+No network. No API keys. Full chain verification.
 
-## MCP Server
+## What Sanna Does
 
-Sanna exposes its capabilities as an [MCP](https://modelcontextprotocol.io/) server for Claude Desktop, Cursor, and other MCP-compatible clients.
+Three primitives:
 
-```bash
-pip install sanna[mcp]
-sanna-mcp  # starts stdio transport
+**Constitutions** define agent boundaries — identity, provenance, invariants (which reasoning checks to run and at what enforcement level), authority boundaries (what actions the agent can/cannot take), trusted source tiers, and halt conditions. Written in YAML, Ed25519-signed, tamper-detected on load.
+
+**Checks** run during execution, not after. Five built-in coherence checks (C1-C5) evaluate the agent's output against its input context in real time. Each check enforces independently — halt (stop execution), warn (Python warning), or log (record silently).
+
+**Receipts** are portable JSON artifacts that prove governance was enforced. Each receipt contains the check results, input/output hashes, a deterministic fingerprint, constitution provenance, and optionally an Ed25519 signature. Receipts are schema-validated and offline-verifiable.
+
+## Features
+
+### Coherence Checks (C1-C5)
+
+| Check | Invariant | What it catches |
+|-------|-----------|-----------------|
+| C1 | `INV_NO_FABRICATION` | Output contradicts explicit statements in the context |
+| C2 | `INV_MARK_INFERENCE` | Definitive claims without hedging language |
+| C3 | `INV_NO_FALSE_CERTAINTY` | Confidence exceeding evidence strength |
+| C4 | `INV_PRESERVE_TENSION` | Conflicting information collapsed into one answer |
+| C5 | `INV_NO_PREMATURE_COMPRESSION` | Complex input reduced to a single sentence |
+
+Built-in checks are deterministic heuristics (pattern matching). They run without external dependencies or API calls.
+
+### Custom Invariant Evaluators
+
+Register domain-specific checks that participate in the receipt pipeline:
+
+```python
+from sanna.evaluators import register_invariant_evaluator
+from sanna.receipt import CheckResult
+
+@register_invariant_evaluator("INV_CUSTOM_PII")
+def check_pii(context, output, constitution, check_config):
+    if "SSN" in output:
+        return CheckResult(
+            check_id="INV_CUSTOM_PII", name="PII Check",
+            passed=False, severity="critical",
+            details="Output contains SSN pattern",
+        )
+    return CheckResult(
+        check_id="INV_CUSTOM_PII", name="PII Check",
+        passed=True, severity="info",
+    )
 ```
 
-Four tools available:
+Custom evaluators that raise exceptions produce `ERRORED` status — the pipeline continues and the receipt records the error.
 
-| Tool | Description |
-|------|-------------|
-| `sanna_verify_receipt` | Verify a receipt's schema, fingerprint, hashes, and status |
-| `sanna_generate_receipt` | Generate a receipt from query/context/response with constitution enforcement |
-| `sanna_list_checks` | List all C1-C5 checks with descriptions and mappings |
-| `sanna_evaluate_action` | Evaluate whether an action is permitted under authority boundaries |
+### LLM-as-Judge Evaluators
 
-See [examples/CLAUDE_DESKTOP_SETUP.md](examples/CLAUDE_DESKTOP_SETUP.md) for Claude Desktop configuration and [src/sanna/mcp/README.md](src/sanna/mcp/README.md) for full MCP server documentation.
+Optional semantic evaluation using an LLM for C1-C5 checks. Uses stdlib `urllib.request` — no extra dependencies.
 
-## Authority Boundaries
+```python
+from sanna.evaluators.llm import enable_llm_checks
 
-Constitutions can define authority boundaries that control which actions an agent may take:
+# Register LLM evaluators for all 5 checks
+enable_llm_checks(api_key="sk-ant-...")
 
-| Boundary | Behavior | Receipt Field |
-|----------|----------|---------------|
-| `cannot_execute` | Action is halted immediately | `authority_decisions[].decision = "halt"` |
-| `must_escalate` | Action is routed to an escalation target | `authority_decisions[].decision = "escalate"` |
-| `can_execute` | Action is explicitly allowed | `authority_decisions[].decision = "allow"` |
+# Or a subset
+enable_llm_checks(api_key="sk-ant-...", checks=["C1", "C3"])
+```
 
-Escalation targets support three types: `log` (Python logging), `webhook` (HTTP POST), and `callback` (registry-based callable).
+On failure (timeout, HTTP error, malformed response), checks return `ERRORED` status rather than crashing the pipeline. Module: `sanna.evaluators.llm`.
+
+### Constitution System
+
+Constitutions are YAML or JSON documents that define the agent's governance surface:
+
+- **Identity**: agent name, domain, description, extensions
+- **Provenance**: author, approvers, approval date/method, change history
+- **Boundaries**: operational constraints with category and severity
+- **Invariants**: which checks to run and at what enforcement level (`halt`/`warn`/`log`)
+- **Authority boundaries**: `cannot_execute`, `must_escalate`, `can_execute`
+- **Trusted sources**: 4-tier source classification for C1 evaluation
+- **Halt conditions**: when the agent should stop
+
+Three built-in templates via `sanna-init`: Enterprise IT (strict), Customer-Facing (standard), General Purpose (advisory).
+
+Constitutions are Ed25519-signed. The signature covers the full document. Hash integrity is verified on load — any modification after signing is detected.
+
+### Authority Boundaries
+
+Three-tier action control defined in the constitution:
+
+| Boundary | Behavior |
+|----------|----------|
+| `cannot_execute` | Action is halted immediately |
+| `must_escalate` | Action is routed to an escalation target |
+| `can_execute` | Action is explicitly allowed |
+
+Escalation targets: `log` (Python logging), `webhook` (HTTP POST via httpx), `callback` (registry-based callable).
 
 ```python
 from sanna import evaluate_authority, load_constitution
@@ -151,102 +198,242 @@ decision = evaluate_authority("send_email", {"to": "user@example.com"}, const)
 # decision.decision = "halt", decision.boundary_type = "cannot_execute"
 ```
 
-Authority decisions are recorded in the receipt's `authority_decisions` section and covered by the receipt fingerprint.
+### Trusted Source Tiers
 
-## Trusted Source Tiers
+Constitutions classify data sources into trust tiers that affect C1 evaluation:
 
-Constitutions can classify data sources into trust tiers that affect C1 (context contradiction) evaluation:
+| Tier | C1 Behavior |
+|------|-------------|
+| `tier_1` | Full trust — claims count as grounded evidence |
+| `tier_2` | Evidence with verification flag in receipt |
+| `tier_3` | Reference only — cannot be sole basis for failure |
+| `untrusted` | Excluded from C1 evaluation |
 
-| Tier | Trust Level | C1 Behavior |
-|------|-------------|-------------|
-| `tier_1` | Full trust | Claims count as grounded evidence |
-| `tier_2` | Verification required | Evidence with verification flag |
-| `tier_3` | Reference only | Cannot be sole basis for claims |
-| `untrusted` | Excluded | Not used in C1 evaluation |
+### Cryptographic Signing
 
-Source trust evaluations are recorded in the receipt's `source_trust_evaluations` section.
+- **Ed25519 keypair generation**: `sanna-keygen`
+- **Constitution signing**: full-document signature with scheme versioning (`constitution_sig_v1`)
+- **Receipt signing**: metadata-binding signature (`receipt_sig_v1`)
+- **Key ID**: SHA-256 fingerprint of the public key (64 hex chars)
 
-## Evidence Bundles
+Module: `sanna.crypto`
 
-An evidence bundle is a self-contained zip archive containing everything needed for offline verification — the receipt, the constitution that governed it, and the public key for signature verification.
+### Offline Verification
+
+`verify_receipt()` checks schema validation, hash format, content hashes, fingerprint recomputation, status consistency, check counts, and optionally Ed25519 signature and constitution chain.
+
+```python
+from sanna import verify_receipt, load_schema
+
+schema = load_schema()
+result = verify_receipt(receipt, schema)
+# result.valid, result.errors, result.warnings
+```
+
+### Evidence Bundles
+
+Self-contained zip archives with receipt + constitution + public key for offline verification:
 
 ```bash
-# Create a bundle
 sanna-create-bundle \
   --receipt receipt.json \
   --constitution constitution.yaml \
   --public-key sanna_ed25519.pub \
   --output evidence.zip
 
-# Verify a bundle (6-step verification)
 sanna-verify-bundle evidence.zip
 ```
 
-Bundle verification runs six checks: bundle structure, receipt schema, receipt fingerprint, constitution signature, provenance chain (receipt-to-constitution binding), and receipt signature.
+Six-step verification: bundle structure, receipt schema, receipt fingerprint, constitution signature, provenance chain, receipt signature.
 
-## Coherence Checks
+Module: `sanna.bundle`
 
-| Invariant | Check | What it catches |
-|---|---|---|
-| `INV_NO_FABRICATION` | C1 — Context Contradiction | Output contradicts explicit statements in the context |
-| `INV_MARK_INFERENCE` | C2 — Mark Inferences | Definitive claims stated without hedging language |
-| `INV_NO_FALSE_CERTAINTY` | C3 — No False Certainty | Confidence that exceeds what the evidence supports |
-| `INV_PRESERVE_TENSION` | C4 — Preserve Tensions | Conflicting information collapsed into a single answer |
-| `INV_NO_PREMATURE_COMPRESSION` | C5 — No Premature Compression | Complex, multi-faceted input reduced to a single sentence |
+### Receipt Persistence
 
-All checks are heuristic (pattern matching). They flag potential issues for human review. Custom invariants (any ID not in the built-in mapping) appear in the receipt as `NOT_CHECKED` — they document the policy but have no built-in evaluator.
-
-## CLI Tools
-
-| Command | Description |
-|---|---|
-| `sanna-verify` | Verify receipt integrity and full provenance chain |
-| `sanna-generate` | Generate a receipt from a Langfuse trace |
-| `sanna-keygen` | Generate Ed25519 keypair for signing |
-| `sanna-sign-constitution` | Cryptographically sign a constitution with Ed25519 |
-| `sanna-hash-constitution` | Compute policy hash without Ed25519 signing |
-| `sanna-verify-constitution` | Verify a constitution's Ed25519 signature |
-| `sanna-init-constitution` | Scaffold a new constitution YAML |
-| `sanna-mcp` | Start the MCP server (stdio transport) |
-| `sanna-create-bundle` | Create an evidence bundle for offline verification |
-| `sanna-verify-bundle` | Verify an evidence bundle (6-step check) |
-
-## Demos
-
-```bash
-python examples/three_constitutions_demo.py       # Three enforcement modes
-python examples/one_more_connector_demo.py         # MCP governance connector
-```
-
-See [examples/README.md](examples/README.md) for full documentation.
-
-## Test Vectors
-
-Deterministic test vectors for third-party verifier implementations are provided in [`tests/vectors/`](tests/vectors/README.md). These cover RFC 8785-style canonical JSON, Ed25519 constitution signatures, and receipt signatures using a fixed seed for reproducibility.
-
-## Langfuse Integration
-
-```bash
-pip install sanna[langfuse]
-```
+SQLite-backed storage with indexed metadata columns:
 
 ```python
-from sanna.adapters.langfuse import export_receipt
+from sanna import ReceiptStore
 
-langfuse = Langfuse(...)
-trace = langfuse.fetch_trace(trace_id)
-receipt = export_receipt(trace.data, constitution_path="constitution.yaml")
+store = ReceiptStore(".sanna/receipts.db")
+store.save(receipt)
+results = store.query(agent_id="my-agent", status="FAIL", limit=50)
+count = store.count(agent_id="my-agent")
+store.close()
 ```
 
-## Install
+Auto-save from the decorator:
+
+```python
+@sanna_observe(constitution_path="constitution.yaml", store=".sanna/receipts.db")
+def my_agent(query: str, context: str) -> str:
+    ...
+```
+
+Supports combinable filters: `agent_id`, `constitution_id`, `trace_id`, `status`, `halt_event`, `check_status`, `since`, `until`, `limit`, `offset`.
+
+Module: `sanna.store`
+
+### Drift Analytics
+
+Per-agent, per-check failure-rate trending with linear regression:
+
+```python
+from sanna import DriftAnalyzer, ReceiptStore
+
+store = ReceiptStore(".sanna/receipts.db")
+analyzer = DriftAnalyzer(store)
+report = analyzer.analyze(window_days=30)
+# report.fleet_status: "HEALTHY" / "WARNING" / "CRITICAL"
+# report.agents[0].checks[0].trend_slope, .projected_breach_days
+```
+
+Multi-window analysis, threshold breach projection, fleet health status. Export to JSON or CSV via `export_drift_report()` / `export_drift_report_to_file()`.
+
+```
+$ sanna-drift-report --db .sanna/receipts.db --window 30
+
+Sanna Fleet Governance Report
+=======================================================
+Window: 30 days | Threshold: 15.0% | Generated: 2026-02-14T18:32:07+00:00
+
+  support-agent        | Fail rate:   2.1% | Trend: - stable       | HEALTHY
+  research-agent       | Fail rate:  11.3% | Trend: ^ degrading    | WARNING
+                         Projected threshold breach in 14 days
+  summarizer-agent     | Fail rate:  22.7% | Trend: ^ degrading    | CRITICAL
+
+Fleet Status: CRITICAL
+=======================================================
+```
+
+Module: `sanna.drift`
+
+### OpenTelemetry Bridge
+
+Exports receipts as OTel spans with a pointer + integrity hash design — span payloads stay small while preserving verifiability.
+
+```python
+from sanna.exporters.otel_exporter import receipt_to_span
+from opentelemetry import trace
+
+tracer = trace.get_tracer("sanna")
+receipt_to_span(receipt, tracer, artifact_uri="s3://bucket/receipt.json")
+```
+
+15 `sanna.*` span attributes. Requires `pip install sanna[otel]`.
+
+Module: `sanna.exporters.otel_exporter`
+
+### Langfuse Adapter
+
+Convert Langfuse traces to Sanna receipts:
+
+```python
+from sanna.adapters.langfuse import langfuse_trace_to_trace_data
+from sanna import generate_receipt
+
+trace_data = langfuse_trace_to_trace_data(langfuse_trace.data)
+receipt = generate_receipt(trace_data)
+```
+
+Requires `pip install sanna[langfuse]`.
+
+Module: `sanna.adapters.langfuse`
+
+### Golden Test Vectors
+
+Deterministic test vectors in `tests/vectors/` for third-party verifier implementations. Cover RFC 8785 canonical JSON, Ed25519 constitution signatures, and receipt signatures using fixed seeds.
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `sanna-init` | Interactive constitution generator with template selection |
+| `sanna-init-constitution` | Scaffold a blank constitution YAML |
+| `sanna-keygen` | Generate Ed25519 keypair (`--signed-by` for metadata) |
+| `sanna-sign-constitution` | Sign a constitution (`--private-key KEY`) |
+| `sanna-hash-constitution` | Compute policy hash without Ed25519 signing |
+| `sanna-verify-constitution` | Verify a constitution's Ed25519 signature |
+| `sanna-verify` | Verify receipt integrity, signature, and provenance chain |
+| `sanna-verify-bundle` | Verify an evidence bundle (6-step check) |
+| `sanna-create-bundle` | Create an evidence bundle zip |
+| `sanna-generate` | Generate a receipt from a Langfuse trace |
+| `sanna-drift-report` | Fleet governance drift report (`--window`, `--export`, `--output`) |
+| `sanna-mcp` | Start MCP server (stdio transport) |
+
+## MCP Server
+
+Sanna exposes 5 tools over [MCP](https://modelcontextprotocol.io/) stdio transport for Claude Desktop, Cursor, and other MCP clients.
 
 ```bash
-pip install sanna                    # Core library
-pip install sanna[mcp]               # With MCP server
-pip install sanna[langfuse]          # With Langfuse adapter
+pip install sanna[mcp]
 ```
 
-Development:
+Add to your MCP client config (e.g., `~/.config/claude/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "sanna": {
+      "command": "sanna-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+**Tools:**
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `sanna_verify_receipt` | `receipt_json` | Verify a receipt offline |
+| `sanna_generate_receipt` | `query`, `context`, `response`, `constitution_path?` | Generate a receipt with constitution enforcement |
+| `sanna_list_checks` | — | List C1-C5 checks with descriptions |
+| `sanna_evaluate_action` | `action_name`, `action_params`, `constitution_path` | Evaluate action against authority boundaries |
+| `sanna_query_receipts` | `db_path?`, `agent_id?`, `status?`, `since?`, `until?`, `halt_only?`, `limit?`, `analysis?` | Query stored receipts or run drift analysis |
+
+## Extension Points
+
+**Custom evaluators**: Register Python functions for domain-specific invariants via `@register_invariant_evaluator()`. Functions receive `(context, output, constitution, check_config)` and return a `CheckResult`. Module: `sanna.evaluators`.
+
+**LLM evaluators**: Call `enable_llm_checks(api_key=...)` to register LLM-backed evaluators for C1-C5. Accepts `checks` parameter for subset registration. Module: `sanna.evaluators.llm`.
+
+**OpenTelemetry**: Use `receipt_to_span()` to export receipts as OTel spans. Module: `sanna.exporters.otel_exporter`.
+
+**Langfuse**: Use `langfuse_trace_to_trace_data()` to convert Langfuse traces to the format `generate_receipt()` expects. Module: `sanna.adapters.langfuse`.
+
+**Escalation callbacks**: Register handlers via `register_escalation_callback(name, fn)` for `must_escalate` rules with `type: "callback"`.
+
+## Architecture
+
+```
+Constitution (YAML) ─→ load + verify hash
+                            │
+                            ▼
+@sanna_observe ─→ capture inputs ─→ execute function ─→ capture output
+                            │
+                            ▼
+                 Configure checks from invariants
+                            │
+                            ▼
+                 Run C1-C5 checks + custom evaluators
+                            │
+                            ▼
+                 Generate receipt (fingerprint, hashes, status)
+                            │
+                            ▼
+                 Sign receipt (optional, Ed25519)
+                            │
+                            ▼
+                 Enforce (halt / warn / log)
+                            │
+                            ▼
+              Store (SQLite) ─→ Export (OTel / Langfuse / CSV / JSON)
+```
+
+The receipt fingerprint is deterministic over: trace ID, content hashes, checks version, check results, constitution ref, halt event, evaluation coverage, authority decisions, escalation events, source trust evaluations, and extensions. Both `middleware.py` and `verify.py` compute identical fingerprints — this is a design invariant.
+
+## Development
 
 ```bash
 git clone https://github.com/nicallen-exd/sanna.git
@@ -255,14 +442,8 @@ pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
 
-646 tests. 0 failures.
+990 tests. 0 failures.
 
 ## License
 
 Apache 2.0
-
-[PyPI](https://pypi.org/project/sanna/) · [GitHub](https://github.com/nicallen-exd/sanna)
-
----
-
-*Sanna is Swedish for "truth."*
