@@ -8,7 +8,7 @@
 #
 # Workflow:
 #   1. Customize identity, boundaries, and enforcement levels below
-#   2. Sign it:  sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
+#   2. Sign it:  sanna-sign-constitution constitution.yaml --private-key <your-key-id>.key
 #   3. Wire it:
 #        from sanna.evaluators.llm import enable_llm_checks
 #        enable_llm_checks(api_key="sk-ant-...")

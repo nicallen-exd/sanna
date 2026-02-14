@@ -69,7 +69,7 @@ _BLANK_TEMPLATE = """\
 #
 # Workflow:
 #   1. Edit this file with your agent's boundaries and governance details
-#   2. Sign it:  sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
+#   2. Sign it:  sanna-sign-constitution constitution.yaml --private-key <your-key-id>.key
 #   3. Wire it:  @sanna_observe(constitution_path="constitution.yaml")
 
 sanna_constitution: "1.0.0"
@@ -266,7 +266,7 @@ def run_interactive() -> int:
     print()
     print("Next steps:")
     print(f"  1. Review and customize: {output_path}")
-    print(f"  2. Sign it:  sanna-sign-constitution {output_path} --private-key sanna_ed25519.key")
+    print(f"  2. Sign it:  sanna-sign-constitution {output_path} --private-key <your-key-id>.key")
     print(f'  3. Wire it:  @sanna_observe(constitution_path="{output_path}")')
     return 0
 

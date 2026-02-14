@@ -8,7 +8,7 @@
 #
 # Workflow:
 #   1. Customize the sections below for your agent's specific domain
-#   2. Sign it:  sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
+#   2. Sign it:  sanna-sign-constitution constitution.yaml --private-key <your-key-id>.key
 #   3. Wire it:  @sanna_observe(constitution_path="constitution.yaml")
 
 sanna_constitution: "1.0.0"

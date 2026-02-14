@@ -88,7 +88,7 @@ sanna-init-constitution my_agent.yaml
 sanna-keygen --signed-by "your-name" keys/
 
 # 4. Sign the constitution
-sanna-sign-constitution my_agent.yaml --private-key keys/sanna_ed25519.key
+sanna-sign-constitution my_agent.yaml --private-key keys/<your-key-id>.key
 
 # 5. Use the signed constitution path in your prompts
 ```

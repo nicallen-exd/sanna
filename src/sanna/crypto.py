@@ -13,8 +13,10 @@ forward compatibility.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -113,7 +115,8 @@ def generate_keypair(
     except OSError:
         pass  # Windows or restricted filesystem
 
-    # Always write metadata sidecar
+    # Always write metadata sidecar (atomic via temp + rename)
+    import os
     meta: dict = {
         "key_id": key_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -124,7 +127,9 @@ def generate_keypair(
     if signed_by:
         meta["signed_by"] = signed_by
     meta_path = output_dir / f"{key_id}.meta.json"
-    meta_path.write_text(json.dumps(meta, indent=2))
+    tmp_meta = meta_path.with_suffix(".meta.json.tmp")
+    tmp_meta.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp_meta, meta_path)
 
     return private_path, public_path
 
@@ -184,12 +189,17 @@ def sign_bytes(data: bytes, private_key: Ed25519PrivateKey) -> str:
 
 
 def verify_signature(data: bytes, signature_b64: str, public_key: Ed25519PublicKey) -> bool:
-    """Verify an Ed25519 signature. Returns True if valid."""
+    """Verify an Ed25519 signature. Returns True if valid.
+
+    Uses strict base64 decoding (validate=True) with whitespace
+    stripping for predictable cross-language behavior.
+    """
     try:
-        signature = base64.b64decode(signature_b64)
+        sig_clean = re.sub(r"\s+", "", signature_b64)
+        signature = base64.b64decode(sig_clean, validate=True)
         public_key.verify(signature, data)
         return True
-    except Exception:
+    except (binascii.Error, ValueError, Exception):
         return False
 
 

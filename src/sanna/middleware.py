@@ -649,8 +649,10 @@ def sanna_observe(
         context_param: Explicit name of the context parameter.
         query_param: Explicit name of the query parameter.
         identity_provider_keys: Optional mapping of public_key_id to path to
-            public key file for identity claim verification. If not provided,
-            claims get "unverified" status (graceful degradation).
+            public key file for identity claim verification. When not provided:
+            claims with signatures get status "no_key" (signature present but
+            no key to verify against); claims without signatures get status
+            "unverified".
         strict: If True (default), validate constitution against JSON schema
             on load. Catches typos like ``invariant:`` instead of ``invariants:``.
         on_violation: Legacy. Used when no constitution invariants are present.

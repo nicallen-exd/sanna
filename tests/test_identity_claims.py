@@ -240,6 +240,55 @@ class TestIdentityClaimParsing:
 
 
 # =============================================================================
+# IDENTITY DICT SYNC
+# =============================================================================
+
+class TestIdentityDictSync:
+    """Tests for _identity_dict sync between identity_claims and extensions."""
+
+    def test_programmatic_claims_appear_in_identity_dict(self):
+        """Programmatic AgentIdentity with identity_claims but no extensions → signing includes them."""
+        from sanna.constitution import _identity_dict
+        claim = _make_claim(provider="prog-provider", credential_id="prog-1")
+        identity = AgentIdentity(
+            agent_name="prog-agent", domain="test",
+            identity_claims=[claim],
+            extensions={},
+        )
+        d = _identity_dict(identity)
+        assert "identity_claims" in d
+        assert d["identity_claims"][0]["provider"] == "prog-provider"
+
+    def test_extensions_take_precedence_over_identity_claims(self):
+        """Programmatic AgentIdentity with both → extensions take precedence."""
+        from sanna.constitution import _identity_dict
+        claim = _make_claim(provider="struct-provider", credential_id="s-1")
+        ext_claims = [{"provider": "ext-provider", "credential_id": "e-1"}]
+        identity = AgentIdentity(
+            agent_name="dual-agent", domain="test",
+            identity_claims=[claim],
+            extensions={"identity_claims": ext_claims},
+        )
+        d = _identity_dict(identity)
+        # Extensions version wins
+        assert d["identity_claims"][0]["provider"] == "ext-provider"
+
+    def test_yaml_parsed_constitution_consistent(self, tmp_path):
+        """YAML-parsed constitution → both representations present and consistent."""
+        claim = _make_claim(provider="yaml-provider", credential_id="y-1")
+        const = _make_constitution(identity_claims=[claim])
+        signed = sign_constitution(const)
+        path = tmp_path / "const.yaml"
+        save_constitution(signed, path)
+        loaded = load_constitution(str(path))
+        # Structured representation
+        assert len(loaded.identity.identity_claims) == 1
+        assert loaded.identity.identity_claims[0].provider == "yaml-provider"
+        # Extensions representation
+        assert "identity_claims" in loaded.identity.extensions
+
+
+# =============================================================================
 # VERIFY IDENTITY CLAIMS FUNCTION
 # =============================================================================
 
@@ -394,6 +443,67 @@ class TestVerifyIdentityClaims:
         )
         summary = verify_identity_claims(identity, {})
         assert summary.results[0].status == "no_key"
+
+    def test_claim_expired_z_suffix(self, tmp_path):
+        """Claim with 'Z' suffix timestamp that is expired → status 'expired'."""
+        priv, pub = generate_keypair(tmp_path / "keys")
+        pub_key = load_public_key(pub)
+        key_id = compute_key_id(pub_key)
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        claim = _make_claim(public_key_id=key_id, expires_at=past)
+        signed_claim = _sign_claim(claim, priv)
+        identity = AgentIdentity(
+            agent_name="test", domain="test",
+            identity_claims=[signed_claim],
+        )
+        summary = verify_identity_claims(identity, {key_id: str(pub)})
+        assert summary.results[0].status == "expired"
+
+    def test_claim_expired_offset_suffix(self, tmp_path):
+        """Claim with '+00:00' suffix that is expired → status 'expired'."""
+        priv, pub = generate_keypair(tmp_path / "keys")
+        pub_key = load_public_key(pub)
+        key_id = compute_key_id(pub_key)
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        claim = _make_claim(public_key_id=key_id, expires_at=past)
+        signed_claim = _sign_claim(claim, priv)
+        identity = AgentIdentity(
+            agent_name="test", domain="test",
+            identity_claims=[signed_claim],
+        )
+        summary = verify_identity_claims(identity, {key_id: str(pub)})
+        assert summary.results[0].status == "expired"
+
+    def test_claim_unparseable_expiry_fails(self, tmp_path):
+        """Claim with unparseable expires_at → status 'failed'."""
+        priv, pub = generate_keypair(tmp_path / "keys")
+        pub_key = load_public_key(pub)
+        key_id = compute_key_id(pub_key)
+        claim = _make_claim(public_key_id=key_id, expires_at="not-a-date")
+        signed_claim = _sign_claim(claim, priv)
+        identity = AgentIdentity(
+            agent_name="test", domain="test",
+            identity_claims=[signed_claim],
+        )
+        summary = verify_identity_claims(identity, {key_id: str(pub)})
+        assert summary.results[0].status == "failed"
+        assert "Invalid expires_at format" in summary.results[0].detail
+
+    def test_claim_naive_timestamp_treated_as_utc(self, tmp_path):
+        """Claim with naive timestamp (no timezone) → treated as UTC."""
+        priv, pub = generate_keypair(tmp_path / "keys")
+        pub_key = load_public_key(pub)
+        key_id = compute_key_id(pub_key)
+        # Future naive timestamp (no tz info) — should still be valid
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        claim = _make_claim(public_key_id=key_id, expires_at=future)
+        signed_claim = _sign_claim(claim, priv)
+        identity = AgentIdentity(
+            agent_name="test", domain="test",
+            identity_claims=[signed_claim],
+        )
+        summary = verify_identity_claims(identity, {key_id: str(pub)})
+        assert summary.results[0].status == "verified"
 
 
 # =============================================================================
@@ -872,3 +982,38 @@ class TestVerifyReporting:
         schema = load_schema()
         vr = verify_receipt(result.receipt, schema)
         assert not any("identity" in w.lower() for w in vr.warnings)
+
+
+# =============================================================================
+# STRICT BASE64 DECODING
+# =============================================================================
+
+class TestStrictBase64:
+    """Tests for strict base64 validation in crypto.verify_signature."""
+
+    def test_malformed_base64_returns_false(self, tmp_path):
+        """Malformed base64 signature → verification returns False."""
+        from sanna.crypto import verify_signature
+        priv, pub = generate_keypair(tmp_path / "keys")
+        pub_key = load_public_key(pub)
+        assert verify_signature(b"some data", "not!valid!base64!", pub_key) is False
+
+    def test_valid_base64_with_whitespace(self, tmp_path):
+        """Valid base64 with whitespace → still works."""
+        from sanna.crypto import sign_bytes
+        priv, pub = generate_keypair(tmp_path / "keys")
+        priv_key = load_private_key(priv)
+        pub_key = load_public_key(pub)
+        data = b"test data"
+        sig = sign_bytes(data, priv_key)
+        # Add whitespace
+        sig_with_ws = sig[:10] + " \n " + sig[10:]
+        from sanna.crypto import verify_signature
+        assert verify_signature(data, sig_with_ws, pub_key) is True
+
+    def test_empty_string_returns_false(self, tmp_path):
+        """Empty string signature → returns False."""
+        from sanna.crypto import verify_signature
+        priv, pub = generate_keypair(tmp_path / "keys")
+        pub_key = load_public_key(pub)
+        assert verify_signature(b"some data", "", pub_key) is False

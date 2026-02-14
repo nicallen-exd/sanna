@@ -291,7 +291,7 @@ def main_init_constitution():
     print("Next steps:")
     print(f"  1. Edit {output_path} with your agent's boundaries and governance details")
     print("  2. Get approval from your compliance/risk team")
-    print(f"  3. Sign it:  sanna-sign-constitution {output_path} --private-key sanna_ed25519.key")
+    print(f"  3. Sign it:  sanna-sign-constitution {output_path} --private-key <your-key-id>.key")
     print(f'  4. Wire it:  @sanna_observe(constitution_path="{output_path}")')
     return 0
 
@@ -357,7 +357,7 @@ def main_hash_constitution():
     print(f"  Hash:       {signed.policy_hash}")
     print()
     print("To add Ed25519 cryptographic signature:")
-    print(f"  sanna-sign-constitution {output_path} --private-key sanna_ed25519.key")
+    print(f"  sanna-sign-constitution {output_path} --private-key <your-key-id>.key")
 
     return 0
 

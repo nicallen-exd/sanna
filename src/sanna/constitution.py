@@ -638,6 +638,12 @@ def _identity_dict(identity: AgentIdentity) -> dict:
     }
     if identity.extensions:
         d.update(identity.extensions)
+
+    # Sync: if identity_claims were set programmatically but not
+    # mirrored into extensions, include them for signing
+    if identity.identity_claims and "identity_claims" not in d:
+        d["identity_claims"] = [asdict(c) for c in identity.identity_claims]
+
     return d
 
 
@@ -858,8 +864,16 @@ def _approval_record_to_signable_dict(record: ApprovalRecord) -> dict:
 def _claim_to_signable_dict(claim: IdentityClaim) -> dict:
     """Build canonical dict for identity claim signature verification.
 
-    Includes all IdentityClaim fields EXCEPT signature (set to "").
-    Same pattern as approval and constitution signatures.
+    Canonical signing rule for identity claims:
+    - Always includes: provider, claim_type, credential_id, issued_at,
+      public_key_id
+    - Includes expires_at ONLY if present (non-empty string)
+    - Sets signature to "" (excluded from signing, same pattern as
+      constitution and approval signatures)
+    - Keys are sorted for canonical JSON serialization
+
+    External verifiers MUST follow this exact rule: omit expires_at
+    when the original claim has no expiry, include it when it does.
     """
     d: dict = {
         "provider": claim.provider,
@@ -926,11 +940,11 @@ def verify_identity_claims(
         # 3. Check expiry (before signature verification)
         if claim.expires_at:
             try:
-                expires = datetime.fromisoformat(claim.expires_at)
-                now = datetime.now(timezone.utc)
-                # Normalize naive datetime to UTC
+                exp_str = claim.expires_at.replace("Z", "+00:00")
+                expires = datetime.fromisoformat(exp_str)
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
                 if now > expires:
                     results.append(IdentityVerificationResult(
                         claim=claim,
@@ -939,7 +953,12 @@ def verify_identity_claims(
                     ))
                     continue
             except (ValueError, TypeError):
-                pass  # Invalid expiry format, proceed to sig check
+                results.append(IdentityVerificationResult(
+                    claim=claim,
+                    status="failed",
+                    detail=f"Invalid expires_at format: {claim.expires_at!r}",
+                ))
+                continue
 
         # 4. Verify signature
         try:
@@ -1314,7 +1333,7 @@ _SCAFFOLD_TEMPLATE = """\
 # Workflow:
 #   1. Edit this file with your agent's specific constraints
 #   2. Get approval from your compliance/risk team
-#   3. Sign it:  sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
+#   3. Sign it:  sanna-sign-constitution constitution.yaml --private-key <your-key-id>.key
 #   4. Wire it into your agent:
 #        @sanna_observe(constitution_path="constitution.yaml")
 

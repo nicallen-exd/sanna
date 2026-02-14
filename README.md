@@ -62,7 +62,7 @@ policy_hash: null
 
 ```bash
 sanna-keygen --signed-by "team@company.com"
-sanna-sign-constitution constitution.yaml --private-key sanna_ed25519.key
+sanna-sign-constitution constitution.yaml --private-key <your-key-id>.key
 ```
 
 **3. Wrap your agent function**
@@ -90,10 +90,10 @@ except SannaHaltError as e:
 
 ```bash
 sanna-verify receipt.json
-sanna-verify receipt.json --public-key sanna_ed25519.pub
+sanna-verify receipt.json --public-key <your-key-id>.pub
 sanna-verify receipt.json \
   --constitution constitution.yaml \
-  --constitution-public-key sanna_ed25519.pub
+  --constitution-public-key <your-key-id>.pub
 ```
 
 No network. No API keys. Full chain verification.
@@ -238,7 +238,7 @@ Self-contained zip archives with receipt + constitution + public key for offline
 sanna-create-bundle \
   --receipt receipt.json \
   --constitution constitution.yaml \
-  --public-key sanna_ed25519.pub \
+  --public-key <your-key-id>.pub \
   --output evidence.zip
 
 sanna-verify-bundle evidence.zip
