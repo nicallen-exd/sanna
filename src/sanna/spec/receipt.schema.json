@@ -387,8 +387,8 @@
         },
         "status": {
           "type": ["string", "null"],
-          "description": "For custom invariants: NOT_CHECKED",
-          "enum": ["NOT_CHECKED", null]
+          "description": "For custom invariants: NOT_CHECKED or ERRORED",
+          "enum": ["NOT_CHECKED", "ERRORED", null]
         },
         "reason": {
           "type": ["string", "null"],

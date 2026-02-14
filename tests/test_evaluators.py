@@ -247,7 +247,7 @@ class TestSannaObserveIntegration:
 
         result = agent(query="test", context=SIMPLE_CONTEXT)
         checks = result.receipt["checks"]
-        custom = [c for c in checks if c.get("source") == "custom_evaluator"]
+        custom = [c for c in checks if c.get("check_impl") == "custom_evaluator"]
         assert len(custom) == 1
         assert custom[0]["check_id"] == "INV_CUSTOM_NO_PII"
         assert custom[0]["passed"] is True
@@ -265,7 +265,7 @@ class TestSannaObserveIntegration:
         with pytest.raises(SannaHaltError) as exc_info:
             agent(query="test", context=SIMPLE_CONTEXT)
         receipt = exc_info.value.receipt
-        custom = [c for c in receipt["checks"] if c.get("source") == "custom_evaluator"]
+        custom = [c for c in receipt["checks"] if c.get("check_impl") == "custom_evaluator"]
         assert len(custom) == 1
         assert custom[0]["passed"] is False
         assert custom[0]["severity"] == "critical"
@@ -296,7 +296,7 @@ class TestSannaObserveIntegration:
         assert len(errored) == 1
         assert errored[0]["check_id"] == "INV_CUSTOM_NO_PII"
         assert "Something broke" in errored[0]["details"]
-        assert errored[0]["source"] == "custom_evaluator"
+        assert errored[0]["check_impl"] == "custom_evaluator"
 
     def test_errored_does_not_halt_pipeline(self):
         """ERRORED evaluator doesn't prevent other checks from running."""
@@ -309,7 +309,7 @@ class TestSannaObserveIntegration:
         result = agent(query="test", context=SIMPLE_CONTEXT)
         checks = result.receipt["checks"]
         # Built-in checks should still have run
-        builtin = [c for c in checks if c.get("source") != "custom_evaluator" and c.get("status") != "ERRORED"]
+        builtin = [c for c in checks if c.get("check_impl") != "custom_evaluator" and c.get("status") != "ERRORED"]
         assert len(builtin) >= 2  # INV_NO_FABRICATION + INV_PRESERVE_TENSION
 
     def test_errored_not_counted_as_failure(self):
@@ -337,7 +337,7 @@ class TestSannaObserveIntegration:
             return SIMPLE_OUTPUT
 
         result = agent(query="test", context=SIMPLE_CONTEXT)
-        custom = [c for c in result.receipt["checks"] if c.get("source") == "custom_evaluator"]
+        custom = [c for c in result.receipt["checks"] if c.get("check_impl") == "custom_evaluator"]
         assert custom[0]["replayable"] is False
 
     def test_builtin_checks_still_replayable(self):
@@ -351,7 +351,7 @@ class TestSannaObserveIntegration:
         result = agent(query="test", context=SIMPLE_CONTEXT)
         builtin = [
             c for c in result.receipt["checks"]
-            if c.get("source") != "custom_evaluator" and c.get("status") not in ("NOT_CHECKED", "ERRORED")
+            if c.get("check_impl") != "custom_evaluator" and c.get("status") not in ("NOT_CHECKED", "ERRORED")
         ]
         assert all(c["replayable"] is True for c in builtin)
 
@@ -387,7 +387,7 @@ class TestMultipleEvaluators:
         checks = result.receipt["checks"]
         sources = set()
         for c in checks:
-            if c.get("source") == "custom_evaluator":
+            if c.get("check_impl") == "custom_evaluator":
                 sources.add("custom")
             elif c.get("status") == "NOT_CHECKED":
                 sources.add("not_checked")

@@ -566,7 +566,7 @@ class TestV063Versions:
 
     def test_init_version(self):
         import sanna
-        assert sanna.__version__ == "0.7.2"
+        assert sanna.__version__ == "0.8.0"
 
 
 # =============================================================================

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.0] - 2026-02-14
+### Added
+- **Receipt persistence** (`ReceiptStore`) — SQLite-backed storage with indexed metadata columns for fleet-level governance queries. Thread-safe, context-manager support, combinable filters (agent_id, status, since/until, halt_event, check_status).
+- **Drift analytics engine** (`DriftAnalyzer`) — per-agent, per-check failure-rate trending with pure-Python linear regression. Multi-window analysis (7/30/90/180-day), threshold breach projection, fleet health status (HEALTHY/WARNING/CRITICAL).
+- **Export formats** — CSV and JSON export for enterprise reporting via `export_drift_report()` / `export_drift_report_to_file()`. CLI flags `--export json|csv` and `--output PATH` on `sanna-drift-report`.
+- **`sanna_query_receipts` MCP tool** — 5th MCP tool for conversational governance posture queries. Filters by agent, status, time range, halt events. `analysis="drift"` mode runs drift analytics and returns fleet health report.
+- **Custom invariant evaluators** — `@register_invariant_evaluator("INV_CUSTOM_*")` decorator for domain-specific checks. Evaluators receive `(context, output, constitution_dict, check_config_dict) -> CheckResult`. ERRORED status for evaluators that throw exceptions. Integrated with constitution engine and middleware.
+- **Interactive `sanna-init` CLI** — guided constitution generator with 3 templates:
+  - Enterprise IT / ServiceNow-style (strict enforcement)
+  - Customer-Facing / Salesforce-style (standard enforcement)
+  - General Purpose / Starter (advisory enforcement)
+  - Plus blank template for fully custom constitutions
+- **Fleet Governance Demo** (`examples/fleet_governance_demo.py`) — simulates 3 agents over 90 days, detects governance drift, exports evidence, verifies receipts offline
+- `sanna-drift-report` CLI command for fleet governance reporting
+- 934 tests (10 xfailed), 0 failures
+
+### Fixed
+- Custom evaluator receipts now pass offline verification — removed `"source"` field from check results (metadata only, not part of receipt schema)
+- Receipt schema updated to allow `"ERRORED"` status on check results
+- OTel exporter canonical hash uses `canonical_json_bytes()` for cross-verifier parity
+- OTel exporter resolves namespaced check IDs via `NAMESPACED_TO_LEGACY` mapping
+
 ## [0.7.0] - 2026-02-13
 ### Added
 - **MCP server** (`sanna-mcp`) — 4 tools over stdio for Claude Desktop/Cursor

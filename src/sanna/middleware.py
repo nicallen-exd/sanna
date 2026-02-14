@@ -377,7 +377,6 @@ def _generate_constitution_receipt(
                     "constitution_version": constitution_version,
                     "check_impl": cfg.check_impl or None,
                     "replayable": False,
-                    "source": "custom_evaluator",
                     "status": "ERRORED",
                 })
                 continue
@@ -396,8 +395,6 @@ def _generate_constitution_receipt(
             "check_impl": cfg.check_impl or None,
             "replayable": cfg.source != "custom_evaluator",
         }
-        if cfg.source == "custom_evaluator":
-            entry["source"] = "custom_evaluator"
         check_results.append(entry)
 
     # Add custom invariants as NOT_CHECKED

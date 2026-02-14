@@ -34,6 +34,26 @@ Generates four receipt JSON files in `demo_receipts/`, each showing:
 - **Coherence checks** — C1 (context contradiction) and C2 (unmarked inference) results
 - **Ed25519 signatures** — cryptographic provenance on both constitution and receipt
 
+### Fleet Governance Demo (`fleet_governance_demo.py`)
+
+Simulates three agents over 90 days with realistic failure patterns.
+Demonstrates ReceiptStore, DriftAnalyzer, custom evaluators, multi-window
+drift analysis, CSV/JSON export, and offline receipt verification.
+
+| Agent | Template | Enforcement | Behavior |
+|-------|----------|-------------|----------|
+| snow-agent | Enterprise IT | strict | Stable ~2% failure rate |
+| sfdc-agent | Customer-Facing | standard | **Drifting** — starts at 2%, ends at 35% |
+| custom-agent | General Purpose | advisory | Stable ~3% + custom evaluator |
+
+```bash
+python examples/fleet_governance_demo.py
+```
+
+Generates 540 receipts, runs multi-window drift analysis (30d + 90d),
+exports fleet reports to CSV and JSON, and verifies receipts offline.
+Completes in under 10 seconds.
+
 ## Constitutions
 
 Sample constitutions in `constitutions/`:
