@@ -532,7 +532,7 @@ def sanna_query_receipts(
                 since=since,
                 until=until,
                 halt_only=halt_only,
-                limit=min(limit, MAX_QUERY_LIMIT),
+                limit=max(1, min(int(limit), MAX_QUERY_LIMIT)),
             )
         finally:
             store.close()

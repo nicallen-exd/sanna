@@ -78,10 +78,104 @@ class TestParseTs:
         aware = _parse_ts("2026-02-14T10:00:00+00:00")
         assert naive == aware
 
+    # FIX 4: Non-string inputs must not crash
+    def test_integer_returns_none(self):
+        assert _parse_ts(1730000000) is None
+
+    def test_float_returns_none(self):
+        assert _parse_ts(123.45) is None
+
+    def test_bool_returns_none(self):
+        assert _parse_ts(True) is None
+
+    def test_none_returns_none(self):
+        assert _parse_ts(None) is None
+
+    def test_dict_returns_none(self):
+        assert _parse_ts({"timestamp": "2026-01-01"}) is None
+
 
 # ---------------------------------------------------------------------------
 # Integration: drift analysis with various timestamp formats
 # ---------------------------------------------------------------------------
+
+class TestDriftErroredChecks:
+    """FIX 5: ERRORED checks excluded from pass/fail metrics."""
+
+    def test_errored_checks_not_counted_as_pass(self, store, analyzer):
+        now = datetime.now(timezone.utc)
+        for i in range(6):
+            ts = (now - timedelta(days=i)).isoformat()
+            store.save({
+                "receipt_id": f"r{i}",
+                "trace_id": f"trace-r{i}",
+                "timestamp": ts,
+                "coherence_status": "PARTIAL",
+                "checks": [
+                    {"check_id": "C1", "name": "C1", "passed": True,
+                     "severity": "critical"},
+                    {"check_id": "C2", "name": "C2", "passed": True,
+                     "severity": "warning"},
+                    {"check_id": "C3", "name": "C3", "passed": True,
+                     "severity": "warning"},
+                    {"check_id": "INV_CUSTOM", "name": "Custom",
+                     "passed": True, "severity": "info",
+                     "status": "ERRORED"},
+                    {"check_id": "INV_CUSTOM_2", "name": "Custom2",
+                     "passed": True, "severity": "info",
+                     "status": "ERRORED"},
+                ],
+                "checks_passed": 3,
+                "checks_failed": 0,
+                "constitution_ref": {
+                    "document_id": "ts-agent/1.0.0",
+                    "policy_hash": "abc",
+                },
+            })
+
+        report = analyzer.analyze(window_days=30)
+        assert len(report.agents) == 1
+        agent = report.agents[0]
+        # ERRORED checks should not appear in check stats
+        check_ids = {c.check_id for c in agent.checks}
+        assert "INV_CUSTOM" not in check_ids
+        assert "INV_CUSTOM_2" not in check_ids
+        # Only the 3 real checks should be counted
+        total_eval = sum(c.total_evaluated for c in agent.checks)
+        assert total_eval == 18  # 3 checks * 6 receipts
+
+    def test_errored_plus_fail_correct_rate(self, store, analyzer):
+        now = datetime.now(timezone.utc)
+        for i in range(6):
+            ts = (now - timedelta(days=i)).isoformat()
+            store.save({
+                "receipt_id": f"r{i}",
+                "trace_id": f"trace-r{i}",
+                "timestamp": ts,
+                "coherence_status": "FAIL",
+                "checks": [
+                    {"check_id": "C1", "name": "C1", "passed": False,
+                     "severity": "critical"},
+                    {"check_id": "INV_ERR", "name": "Err",
+                     "passed": True, "severity": "info",
+                     "status": "ERRORED"},
+                ],
+                "checks_passed": 0,
+                "checks_failed": 1,
+                "constitution_ref": {
+                    "document_id": "ts-agent/1.0.0",
+                    "policy_hash": "abc",
+                },
+            })
+
+        report = analyzer.analyze(window_days=30)
+        agent = report.agents[0]
+        # Only C1 should be in stats with 100% fail rate
+        assert len(agent.checks) == 1
+        assert agent.checks[0].check_id == "C1"
+        assert agent.checks[0].fail_count == 6
+        assert agent.checks[0].pass_count == 0
+
 
 class TestDriftTimestampIntegration:
 
@@ -117,6 +211,23 @@ class TestDriftTimestampIntegration:
         report = analyzer.analyze(window_days=30)
         assert len(report.agents) == 1
         assert report.agents[0].total_receipts == 6
+
+    def test_corrupted_integer_timestamp_skipped(self, store, analyzer):
+        """Receipt with integer timestamp is skipped without crash."""
+        now = datetime.now(timezone.utc)
+        # Store 5 good receipts + 1 with corrupted timestamp
+        for i in range(5):
+            ts = (now - timedelta(days=i)).isoformat()
+            store.save(_make_receipt(f"r{i}", ts))
+        # Manually insert a receipt with integer timestamp
+        bad_receipt = _make_receipt("bad", 1730000000)
+        store.save(bad_receipt)
+
+        report = analyzer.analyze(window_days=30)
+        assert len(report.agents) == 1
+        # The bad receipt has an integer timestamp so it's excluded by
+        # the store's SQL timestamp filter — only the 5 good receipts appear.
+        assert report.agents[0].total_receipts == 5
 
     def test_mixed_timestamp_formats(self, store, analyzer):
         """Mix of naive, Z, and offset timestamps all contribute."""

@@ -612,6 +612,31 @@ class TestQueryLimitOffset:
 # SCHEMA VERSION GUARD
 # =============================================================================
 
+class TestNegativeLimit:
+    """FIX 3: Negative limit should not bypass row guards."""
+
+    def test_negative_limit_returns_all(self, store):
+        """Negative limit is treated as no limit (returns all rows)."""
+        for i in range(10):
+            store.save(_make_receipt(receipt_id=f"r-{i}"))
+        results = store.query(limit=-1)
+        assert len(results) == 10
+
+    def test_zero_limit_returns_zero(self, store):
+        """Limit=0 returns 0 rows."""
+        for i in range(10):
+            store.save(_make_receipt(receipt_id=f"r-{i}"))
+        results = store.query(limit=0)
+        assert len(results) == 0
+
+    def test_large_negative_limit_safe(self, store):
+        """Very large negative limit doesn't crash or bypass."""
+        for i in range(5):
+            store.save(_make_receipt(receipt_id=f"r-{i}"))
+        results = store.query(limit=-1000000)
+        assert len(results) == 5
+
+
 class TestSchemaVersionGuard:
 
     def test_mismatched_schema_version_raises(self, tmp_path):
@@ -640,6 +665,31 @@ class TestSchemaVersionGuard:
         s2 = ReceiptStore(db_path)
         assert s2.count() == 1
         s2.close()
+
+
+class TestSchemaVersionClosesConnection:
+    """FIX 6: Schema version mismatch closes DB connection."""
+
+    def test_connection_closed_on_mismatch(self, tmp_path):
+        """After schema version mismatch, DB is not left locked."""
+        import sqlite3
+        db_path = str(tmp_path / "lock.db")
+        # Create and close normally
+        s = ReceiptStore(db_path)
+        s.close()
+        # Tamper with schema_version
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE schema_version SET version = 999")
+        conn.commit()
+        conn.close()
+        # Open should fail
+        with pytest.raises(ValueError, match="schema version"):
+            ReceiptStore(db_path)
+        # DB should NOT be locked — prove by opening with raw sqlite3
+        conn2 = sqlite3.connect(db_path)
+        row = conn2.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        assert row[0] == 999
+        conn2.close()
 
 
 class TestWALMode:

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.2] - 2026-02-14
+### Changed
+- **LLM evaluator IDs renamed** — LLM semantic invariants now use distinct `INV_LLM_*` IDs (`INV_LLM_CONTEXT_GROUNDING`, `INV_LLM_FABRICATION_DETECTION`, `INV_LLM_INSTRUCTION_ADHERENCE`, `INV_LLM_FALSE_CERTAINTY`, `INV_LLM_PREMATURE_COMPRESSION`). These are separate semantic invariants, not replacements for built-in C1-C5 checks. Aliases are `LLM_C1` through `LLM_C5`.
+- **LLM `evaluate()` raises on failure** — `LLMJudge.evaluate()` now raises `LLMEvaluationError` on API errors, timeouts, and malformed responses instead of returning a failed `CheckResult`. The middleware's existing exception handler produces ERRORED status, preventing false halts when the LLM API is unavailable.
+- **Strict response validation** — `_parse_result()` validates that `pass` is bool, `confidence` is a number, and `evidence` is a string. Missing or wrong-typed fields raise `LLMEvaluationError`.
+
+### Added
+- **`llm_enhanced` constitution template** — new template combining built-in C1-C5 invariants with 5 LLM semantic invariants at `warn` enforcement.
+- **LLM evaluator integration tests** — 8 tests covering full middleware pipeline: happy path, API failure under halt enforcement, no interference with built-in checks, multi-invariant end-to-end.
+
+### Fixed
+- **Negative limit bypass in MCP query** — `LIMIT -1` in SQLite dumps the entire database. MCP server now clamps limit to `max(1, min(int(limit), MAX_QUERY_LIMIT))`. Store adds defense in depth: negative limits treated as no-limit.
+- **Non-string timestamps crash drift** — `_parse_ts()` now guards against non-string inputs (int, float, bool, None, dict) instead of crashing with `AttributeError`.
+- **Drift analysis counts ERRORED as pass** — ERRORED checks are now excluded from pass/fail metrics in drift analysis, consistent with verifier and middleware behavior.
+- **Schema version mismatch leaks connection** — `ReceiptStore.__init__()` now closes the SQLite connection if `_init_schema()` raises, preventing connection leaks on version mismatch errors.
+- **`enable_llm_checks()` not idempotent** — `register_llm_evaluators()` now checks `get_evaluator()` before registering, silently skipping already-registered invariants. Safe to call multiple times.
+
 ## [0.8.1] - 2026-02-13
 ### Added
 - **LLM-as-Judge semantic evaluators** (`sanna.evaluators.llm`) — optional LLM-backed C1-C5 evaluation via Anthropic Messages API using stdlib `urllib.request`. `LLMJudge` class with `enable_llm_checks()` convenience function. Graceful ERRORED status on failure (timeout, HTTP error, malformed response). Check aliases (C1-C5) map to invariant IDs.

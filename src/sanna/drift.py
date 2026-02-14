@@ -135,14 +135,14 @@ def _extract_constitution_id(receipt: dict) -> Optional[str]:
     return doc_id if doc_id and isinstance(doc_id, str) else None
 
 
-def _parse_ts(ts_str: str) -> Optional[datetime]:
+def _parse_ts(ts_str) -> Optional[datetime]:
     """Best-effort ISO-8601 parse (stdlib only).
 
     Handles "Z" suffix (all Python versions) and normalizes naive
     timestamps to UTC so subtraction against timezone-aware values
-    never raises TypeError.
+    never raises TypeError.  Non-string inputs return None.
     """
-    if not ts_str:
+    if not isinstance(ts_str, str) or not ts_str:
         return None
     try:
         ts_str = ts_str.replace("Z", "+00:00")
@@ -150,7 +150,7 @@ def _parse_ts(ts_str: str) -> Optional[datetime]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         return None
 
 
@@ -333,8 +333,8 @@ class DriftAnalyzer:
             for check in r.get("checks", []):
                 if not isinstance(check, dict):
                     continue
-                # Skip NOT_CHECKED entries
-                if check.get("status") == "NOT_CHECKED":
+                # Skip non-evaluated entries (NOT_CHECKED, ERRORED)
+                if check.get("status") in ("NOT_CHECKED", "ERRORED"):
                     continue
 
                 cid = check.get("check_id", "unknown")

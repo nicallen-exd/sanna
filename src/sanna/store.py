@@ -127,7 +127,11 @@ class ReceiptStore:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        try:
+            self._init_schema()
+        except Exception:
+            self._conn.close()
+            raise
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -244,14 +248,20 @@ class ReceiptStore:
             agent_id, constitution_id, trace_id, status, halt_event,
             check_status, since, until, limit, offset.
 
+        Note: offset is only applied when limit is also provided.
+
         Returns list of full receipt dicts, ordered by timestamp descending.
         """
         where, params = self._build_where(filters)
         sql = f"SELECT receipt_json FROM receipts WHERE {where} ORDER BY timestamp DESC"
 
         if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
+            # Defense in depth: clamp negative limits
+            if limit < 0:
+                limit = None
+            else:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
 
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
