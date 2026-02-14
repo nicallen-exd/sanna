@@ -19,6 +19,7 @@ from sanna.mcp.server import (
     sanna_generate_receipt,
     sanna_list_checks,
     sanna_evaluate_action,
+    check_constitution_approval,
     mcp,
 )
 
@@ -479,3 +480,232 @@ class TestQueryReceipts:
 
         result = json.loads(sanna_query_receipts(db_path=db, halt_only=True))
         assert result["count"] == 1
+
+
+# =============================================================================
+# 9. check_constitution_approval
+# =============================================================================
+
+from sanna.constitution import (
+    Constitution,
+    AgentIdentity,
+    Provenance,
+    Boundary,
+    Invariant,
+    sign_constitution,
+    save_constitution,
+    approve_constitution,
+)
+from sanna.crypto import generate_keypair
+
+
+@pytest.fixture()
+def approved_constitution(tmp_path):
+    """Create a signed and approved constitution for MCP tests."""
+    author_priv, author_pub = generate_keypair(tmp_path / "author_keys")
+    approver_priv, approver_pub = generate_keypair(tmp_path / "approver_keys")
+
+    const = Constitution(
+        schema_version="0.1.0",
+        identity=AgentIdentity(agent_name="mcp-test-agent", domain="testing"),
+        provenance=Provenance(
+            authored_by="alice@corp.com",
+            approved_by=["bob@corp.com"],
+            approval_date="2026-01-15",
+            approval_method="manual",
+        ),
+        boundaries=[Boundary(id="B001", description="Test", category="scope", severity="high")],
+        invariants=[Invariant(id="INV_NO_FABRICATION", rule="No fabrication", enforcement="halt")],
+    )
+    signed = sign_constitution(const, private_key_path=str(author_priv))
+    const_path = tmp_path / "approved.yaml"
+    save_constitution(signed, const_path)
+    approve_constitution(const_path, approver_priv, "bob@corp.com", "VP Compliance", "1.0")
+
+    return {
+        "const_path": str(const_path),
+        "author_priv": author_priv,
+        "author_pub": author_pub,
+        "approver_priv": approver_priv,
+        "approver_pub": approver_pub,
+        "tmp_path": tmp_path,
+    }
+
+
+@pytest.fixture()
+def unapproved_constitution(tmp_path):
+    """Create a signed but NOT approved constitution for MCP tests."""
+    author_priv, author_pub = generate_keypair(tmp_path / "keys")
+    const = Constitution(
+        schema_version="0.1.0",
+        identity=AgentIdentity(agent_name="unapproved-agent", domain="testing"),
+        provenance=Provenance(
+            authored_by="alice@corp.com",
+            approved_by=["bob@corp.com"],
+            approval_date="2026-01-15",
+            approval_method="manual",
+        ),
+        boundaries=[Boundary(id="B001", description="Test", category="scope", severity="high")],
+        invariants=[Invariant(id="INV_NO_FABRICATION", rule="No fabrication", enforcement="halt")],
+    )
+    signed = sign_constitution(const, private_key_path=str(author_priv))
+    const_path = tmp_path / "unapproved.yaml"
+    save_constitution(signed, const_path)
+
+    return {"const_path": str(const_path), "tmp_path": tmp_path}
+
+
+class TestCheckConstitutionApproval:
+    def test_approved_constitution_returns_approved_true(self, approved_constitution):
+        """Tool returns approved=true for valid approved constitution."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+        ))
+        assert result["approved"] is True
+        assert result["approver_id"] == "bob@corp.com"
+        assert result["approver_role"] == "VP Compliance"
+        assert result["constitution_version"] == "1.0"
+
+    def test_unapproved_constitution_returns_approved_false(self, unapproved_constitution):
+        """Tool returns approved=false for unapproved constitution."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=unapproved_constitution["const_path"],
+        ))
+        assert result["approved"] is False
+        assert "no approval record" in result["reason"].lower()
+
+    def test_content_hash_valid_when_untampered(self, approved_constitution):
+        """Tool returns content_hash_valid=true when content matches."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+        ))
+        assert result["content_hash_valid"] is True
+
+    def test_content_hash_invalid_when_tampered(self, approved_constitution):
+        """Tool returns content_hash_valid=false when content modified."""
+        import yaml
+        const_path = Path(approved_constitution["const_path"])
+        data = yaml.safe_load(const_path.read_text())
+        # Tamper: change the agent name
+        data["identity"]["agent_name"] = "tampered-agent"
+        const_path.write_text(yaml.dump(data, default_flow_style=False))
+
+        result = json.loads(check_constitution_approval(
+            constitution_path=str(const_path),
+        ))
+        assert result["approved"] is False
+        assert "modified" in result["reason"].lower() or "mismatch" in result["reason"].lower()
+
+    def test_missing_constitution_returns_error(self):
+        """Tool handles missing constitution gracefully."""
+        result = json.loads(check_constitution_approval(
+            constitution_path="/nonexistent/constitution.yaml",
+        ))
+        assert result["approved"] is False
+        assert "not found" in result["reason"].lower()
+
+    def test_author_signature_present(self, approved_constitution):
+        """Tool reports author signature present/verified structure."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+        ))
+        assert result["author_signature"]["present"] is True
+        # No key provided → verified is null
+        assert result["author_signature"]["verified"] is None
+
+    def test_approved_at_is_iso8601(self, approved_constitution):
+        """Approval timestamp is a valid ISO 8601 string."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+        ))
+        assert result["approved"] is True
+        from datetime import datetime
+        datetime.fromisoformat(result["approved_at"])
+
+    def test_tool_output_is_valid_json(self, approved_constitution):
+        """Tool output is valid JSON with expected keys."""
+        raw = check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+        )
+        result = json.loads(raw)
+        for key in ("approved", "approver_id", "approver_role", "approved_at",
+                     "constitution_version", "content_hash_valid",
+                     "author_signature", "approval_signature"):
+            assert key in result, f"Missing key: {key}"
+
+    def test_tool_registered_in_server(self):
+        """Tool is registered in the MCP server tool list."""
+        assert callable(check_constitution_approval)
+
+    def test_unapproved_still_reports_author_signature(self, unapproved_constitution):
+        """Unapproved constitution still reports author signature status."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=unapproved_constitution["const_path"],
+        ))
+        assert result["approved"] is False
+        assert "author_signature" in result
+        assert result["author_signature"]["present"] is True
+
+    # --- CRITICAL-2: Signature verification tests ---
+
+    def test_no_keys_verified_is_null(self, approved_constitution):
+        """With no keys provided, verified fields are null."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+        ))
+        assert result["approved"] is True
+        assert result["author_signature"]["verified"] is None
+        assert result["approval_signature"]["verified"] is None
+
+    def test_author_key_verifies_author_signature(self, approved_constitution):
+        """With author key, author signature is verified."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+            author_public_key_path=str(approved_constitution["author_pub"]),
+        ))
+        assert result["approved"] is True
+        assert result["author_signature"]["verified"] is True
+
+    def test_approver_key_verifies_approval_signature(self, approved_constitution):
+        """With approver key, approval signature is verified."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+            approver_public_key_path=str(approved_constitution["approver_pub"]),
+        ))
+        assert result["approved"] is True
+        assert result["approval_signature"]["verified"] is True
+
+    def test_both_keys_full_verification(self, approved_constitution):
+        """With both keys, full verification."""
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+            author_public_key_path=str(approved_constitution["author_pub"]),
+            approver_public_key_path=str(approved_constitution["approver_pub"]),
+        ))
+        assert result["approved"] is True
+        assert result["author_signature"]["verified"] is True
+        assert result["approval_signature"]["verified"] is True
+
+    def test_forged_approval_empty_sig_returns_false(self, approved_constitution):
+        """Forged approval with empty signature returns approved=false."""
+        import yaml
+        const_path = Path(approved_constitution["const_path"])
+        data = yaml.safe_load(const_path.read_text())
+        data["approval"]["records"][0]["approval_signature"] = ""
+        const_path.write_text(yaml.dump(data, default_flow_style=False))
+
+        result = json.loads(check_constitution_approval(
+            constitution_path=str(const_path),
+        ))
+        assert result["approved"] is False
+        assert "missing" in result["reason"].lower() or "empty" in result["reason"].lower()
+
+    def test_wrong_approver_key_fails_verification(self, approved_constitution):
+        """Wrong approver key fails approval signature verification."""
+        # Use author key as approver key (wrong key)
+        result = json.loads(check_constitution_approval(
+            constitution_path=approved_constitution["const_path"],
+            approver_public_key_path=str(approved_constitution["author_pub"]),
+        ))
+        assert result["approved"] is False
+        assert result["approval_signature"]["verified"] is False

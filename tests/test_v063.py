@@ -472,7 +472,7 @@ class TestChainVerification:
             return "Grounded answer."
 
         result = agent(query="test", context="Context")
-        errors = verify_constitution_chain(
+        errors, _ = verify_constitution_chain(
             result.receipt, str(const_path), str(pub_path)
         )
         assert errors == [], f"Chain errors: {errors}"
@@ -494,7 +494,7 @@ class TestChainVerification:
         content = content.replace("test-agent", "evil-agent")
         const_path.write_text(content)
 
-        errors = verify_constitution_chain(result.receipt, str(const_path))
+        errors, _ = verify_constitution_chain(result.receipt, str(const_path))
         assert len(errors) > 0
 
     def test_wrong_constitution_public_key(self, tmp_path):
@@ -509,7 +509,7 @@ class TestChainVerification:
             return "Grounded answer."
 
         result = agent(query="test", context="Context")
-        errors = verify_constitution_chain(result.receipt, str(const_path), str(wrong_pub))
+        errors, _ = verify_constitution_chain(result.receipt, str(const_path), str(wrong_pub))
         assert len(errors) > 0
         assert any("signature" in e.lower() for e in errors)
 
@@ -534,7 +534,7 @@ class TestChainVerification:
         signed2, path2 = _sign_and_save(const2, tmp_path / "c2", priv_path)
 
         # Verify receipt against wrong constitution
-        errors = verify_constitution_chain(result.receipt, str(path2), str(pub_path))
+        errors, _ = verify_constitution_chain(result.receipt, str(path2), str(pub_path))
         assert len(errors) > 0
         assert any("mismatch" in e.lower() or "match" in e.lower() for e in errors)
 
@@ -549,7 +549,7 @@ class TestChainVerification:
             return "Grounded answer."
 
         result = agent(query="test", context="Context")
-        errors = verify_constitution_chain(result.receipt, str(const_path))
+        errors, _ = verify_constitution_chain(result.receipt, str(const_path))
         assert errors == []
 
 
@@ -559,14 +559,14 @@ class TestChainVerification:
 
 class TestV063Versions:
     def test_tool_version(self):
-        assert TOOL_VERSION == "0.8.2"
+        assert TOOL_VERSION == "0.9.0"
 
     def test_checks_version(self):
         assert CHECKS_VERSION == "4"
 
     def test_init_version(self):
         import sanna
-        assert sanna.__version__ == "0.8.2"
+        assert sanna.__version__ == "0.9.0"
 
 
 # =============================================================================

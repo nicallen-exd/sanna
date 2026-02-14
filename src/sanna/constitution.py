@@ -41,6 +41,7 @@ CONSTITUTION_SCHEMA_VERSION = "0.1.0"
 VALID_CATEGORIES = {"scope", "authorization", "confidentiality", "safety", "compliance", "custom"}
 VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 VALID_ENFORCEMENT = {"halt", "warn", "log"}
+VALID_APPROVAL_STATUSES = {"approved", "pending", "revoked"}
 
 _BOUNDARY_ID_RE = re.compile(r"^B\d{3}$")
 _HALT_ID_RE = re.compile(r"^H\d{3}$")
@@ -189,6 +190,45 @@ class AuthorityBoundaries:
 
 
 @dataclass
+class ApprovalRecord:
+    """A single approval record binding an approver to a constitution version.
+
+    The approval_signature is an Ed25519 signature over the canonical JSON
+    of all fields EXCEPT approval_signature itself (same pattern as receipt
+    signatures).  The content_hash binds the approval to the specific
+    constitution content at the time of approval.
+    """
+    status: str               # "approved" | "pending" | "revoked"
+    approver_id: str          # Email or identifier of approver
+    approver_role: str        # Human-readable role: "VP Risk", "CISO", etc.
+    approved_at: str          # ISO 8601 timestamp
+    approval_signature: str   # Base64-encoded Ed25519 signature
+    constitution_version: str # Human-readable version (e.g., "3", "1.2.0")
+    content_hash: str         # SHA-256 hash of constitution content AT approval time
+    previous_version_hash: Optional[str] = None  # Links to prior version
+
+
+@dataclass
+class ApprovalChain:
+    """Chain of approval records for a constitution.
+
+    v0.9.0 only writes/validates a single record.  The array structure
+    is forward-compatible for multi-party chains in future versions.
+    """
+    records: list[ApprovalRecord] = field(default_factory=list)
+
+    @property
+    def current(self) -> Optional[ApprovalRecord]:
+        """Most recent approval record."""
+        return self.records[-1] if self.records else None
+
+    @property
+    def is_approved(self) -> bool:
+        """True if most recent record has status 'approved'."""
+        return self.current is not None and self.current.status == "approved"
+
+
+@dataclass
 class Constitution:
     schema_version: str
     identity: AgentIdentity
@@ -200,6 +240,7 @@ class Constitution:
     policy_hash: Optional[str] = None
     authority_boundaries: Optional[AuthorityBoundaries] = None
     trusted_sources: Optional[TrustedSources] = None
+    approval: Optional[ApprovalChain] = None
 
 
 # =============================================================================
@@ -475,6 +516,34 @@ def parse_constitution(data: dict) -> Constitution:
             untrusted=ts_data.get("untrusted", []),
         )
 
+    # Approval chain (optional, v0.9.0+)
+    approval = None
+    approval_data = data.get("approval")
+    if approval_data is not None and isinstance(approval_data, dict):
+        records_data = approval_data.get("records", [])
+        if isinstance(records_data, list):
+            records = []
+            for rec in records_data:
+                if not isinstance(rec, dict):
+                    continue
+                status = rec.get("status", "")
+                if status not in VALID_APPROVAL_STATUSES:
+                    raise ValueError(
+                        f"Invalid approval status: {status!r}. "
+                        f"Must be one of {sorted(VALID_APPROVAL_STATUSES)}"
+                    )
+                records.append(ApprovalRecord(
+                    status=status,
+                    approver_id=rec.get("approver_id", ""),
+                    approver_role=rec.get("approver_role", ""),
+                    approved_at=rec.get("approved_at", ""),
+                    approval_signature=rec.get("approval_signature", ""),
+                    constitution_version=rec.get("constitution_version", ""),
+                    content_hash=rec.get("content_hash", ""),
+                    previous_version_hash=rec.get("previous_version_hash"),
+                ))
+            approval = ApprovalChain(records=records)
+
     return Constitution(
         schema_version=str(schema_version),
         identity=identity,
@@ -486,6 +555,7 @@ def parse_constitution(data: dict) -> Constitution:
         policy_hash=data.get("policy_hash"),
         authority_boundaries=authority_boundaries,
         trusted_sources=trusted_sources,
+        approval=approval,
     )
 
 
@@ -570,6 +640,22 @@ def compute_constitution_hash(constitution: Constitution) -> str:
 
     canonical = json.dumps(hashable, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def compute_content_hash(constitution: Constitution) -> str:
+    """Compute SHA-256 hash of constitution content EXCLUDING the approval block.
+
+    This is the machine-verifiable identifier used in approval records.
+    It covers the same fields as ``compute_constitution_hash`` (identity,
+    boundaries, trust_tiers, halt_conditions, invariants, authority_boundaries,
+    trusted_sources) — content that defines governance rules.
+
+    The content_hash is distinct from policy_hash only conceptually:
+    policy_hash is set by ``sign_constitution()`` and is the same computation.
+    ``compute_content_hash()`` is a semantic alias that makes the approval
+    workflow's intent explicit.
+    """
+    return compute_constitution_hash(constitution)
 
 
 def constitution_to_signable_dict(constitution: Constitution) -> dict:
@@ -662,6 +748,7 @@ def sign_constitution(
             policy_hash=policy_hash,
             authority_boundaries=constitution.authority_boundaries,
             trusted_sources=constitution.trusted_sources,
+            approval=constitution.approval,
         )
         prov_signature = sign_constitution_full(pre_signed, private_key_path, signed_by=signed_by)
 
@@ -683,7 +770,142 @@ def sign_constitution(
         policy_hash=policy_hash,
         authority_boundaries=constitution.authority_boundaries,
         trusted_sources=constitution.trusted_sources,
+        approval=constitution.approval,
     )
+
+
+# =============================================================================
+# APPROVAL
+# =============================================================================
+
+def _approval_record_to_signable_dict(record: ApprovalRecord) -> dict:
+    """Build the canonical dict that gets Ed25519-signed for an approval.
+
+    Includes all ApprovalRecord fields EXCEPT approval_signature (set to "").
+    """
+    d = {
+        "status": record.status,
+        "approver_id": record.approver_id,
+        "approver_role": record.approver_role,
+        "approved_at": record.approved_at,
+        "approval_signature": "",  # excluded from signing
+        "constitution_version": record.constitution_version,
+        "content_hash": record.content_hash,
+    }
+    if record.previous_version_hash is not None:
+        d["previous_version_hash"] = record.previous_version_hash
+    return d
+
+
+def approve_constitution(
+    constitution_path: Path | str,
+    approver_private_key: bytes | str | Path,
+    approver_id: str,
+    approver_role: str,
+    constitution_version: str,
+) -> ApprovalRecord:
+    """Approve a constitution by signing it with the approver's key.
+
+    Args:
+        constitution_path: Path to the constitution YAML/JSON file.
+        approver_private_key: Path to Ed25519 private key PEM file.
+        approver_id: Email or identifier of the approver.
+        approver_role: Human-readable role (e.g., "VP Risk").
+        constitution_version: Human-readable version string.
+
+    Returns:
+        The ApprovalRecord that was created and embedded in the constitution.
+
+    Raises:
+        SannaConstitutionError: If constitution is not signed by author.
+        FileNotFoundError: If constitution or key file not found.
+    """
+    import warnings
+    from .crypto import (
+        load_private_key, compute_key_id, sign_bytes,
+    )
+    from .hashing import canonical_json_bytes
+
+    constitution_path = Path(constitution_path)
+    approver_private_key = Path(approver_private_key)
+
+    # 1. Load constitution
+    constitution = load_constitution(str(constitution_path))
+
+    # 2. Verify author signature exists
+    sig = constitution.provenance.signature
+    if sig is None or not sig.value:
+        raise SannaConstitutionError(
+            "Constitution must be signed before approval. "
+            "Run `sanna-sign-constitution` first."
+        )
+
+    # 3. Load approver key
+    private_key = load_private_key(str(approver_private_key))
+    public_key = private_key.public_key()
+    approver_key_id = compute_key_id(public_key)
+
+    # 4. Warn if same key for author and approver
+    if sig.key_id and sig.key_id == approver_key_id:
+        warnings.warn(
+            "Author and approver keys are identical. For production governance, "
+            "use separate keys for author and approver roles.",
+            stacklevel=2,
+        )
+
+    # 5. Compute content hash (excludes approval block)
+    content_hash = compute_content_hash(constitution)
+
+    # 6. Determine previous_version_hash
+    previous_version_hash = None
+    if constitution.approval is not None and constitution.approval.current is not None:
+        previous_version_hash = constitution.approval.current.content_hash
+        warnings.warn(
+            "Overwriting existing approval record.",
+            stacklevel=2,
+        )
+
+    # 7. Build approval record (without signature yet)
+    approved_at = datetime.now(timezone.utc).isoformat()
+    record = ApprovalRecord(
+        status="approved",
+        approver_id=approver_id,
+        approver_role=approver_role,
+        approved_at=approved_at,
+        approval_signature="",  # placeholder
+        constitution_version=constitution_version,
+        content_hash=content_hash,
+        previous_version_hash=previous_version_hash,
+    )
+
+    # 8. Sign the approval record
+    signable_dict = _approval_record_to_signable_dict(record)
+    data = canonical_json_bytes(signable_dict)
+    signature_b64 = sign_bytes(data, private_key)
+    record.approval_signature = signature_b64
+
+    # 9. Create/replace approval chain
+    approval_chain = ApprovalChain(records=[record])
+
+    # 10. Build updated constitution with approval
+    updated = Constitution(
+        schema_version=constitution.schema_version,
+        identity=constitution.identity,
+        provenance=constitution.provenance,
+        boundaries=constitution.boundaries,
+        trust_tiers=constitution.trust_tiers,
+        halt_conditions=constitution.halt_conditions,
+        invariants=constitution.invariants,
+        policy_hash=constitution.policy_hash,
+        authority_boundaries=constitution.authority_boundaries,
+        trusted_sources=constitution.trusted_sources,
+        approval=approval_chain,
+    )
+
+    # 11. Write back
+    save_constitution(updated, constitution_path)
+
+    return record
 
 
 # =============================================================================
@@ -713,6 +935,22 @@ def constitution_to_receipt_ref(constitution: Constitution) -> dict:
         ref["signed_by"] = sig.signed_by
         ref["signed_at"] = sig.signed_at
         ref["scheme"] = sig.scheme
+
+    # v0.9.0: Always include constitution_approval in receipt binding.
+    # When approved, include full record. When not, mark as unapproved.
+    if constitution.approval is not None and constitution.approval.current is not None:
+        rec = constitution.approval.current
+        ref["constitution_approval"] = {
+            "status": rec.status,
+            "approver_id": rec.approver_id,
+            "approver_role": rec.approver_role,
+            "approved_at": rec.approved_at,
+            "constitution_version": rec.constitution_version,
+            "content_hash": rec.content_hash,
+        }
+    else:
+        ref["constitution_approval"] = {"status": "unapproved"}
+
     return ref
 
 
@@ -840,6 +1078,26 @@ def constitution_to_dict(constitution: Constitution) -> dict:
         result["trusted_sources"] = asdict(constitution.trusted_sources)
 
     result["policy_hash"] = constitution.policy_hash
+
+    # Approval chain (v0.9.0+) — included in serialization but NOT in
+    # policy_hash or content_hash computation.
+    if constitution.approval is not None:
+        records = []
+        for rec in constitution.approval.records:
+            rec_dict = {
+                "status": rec.status,
+                "approver_id": rec.approver_id,
+                "approver_role": rec.approver_role,
+                "approved_at": rec.approved_at,
+                "approval_signature": rec.approval_signature,
+                "constitution_version": rec.constitution_version,
+                "content_hash": rec.content_hash,
+            }
+            if rec.previous_version_hash is not None:
+                rec_dict["previous_version_hash"] = rec.previous_version_hash
+            records.append(rec_dict)
+        result["approval"] = {"records": records}
+
     return result
 
 

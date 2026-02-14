@@ -240,6 +240,59 @@
           "type": ["string", "null"],
           "description": "Signature scheme identifier",
           "enum": ["constitution_sig_v1", null]
+        },
+        "constitution_approval": {
+          "description": "Approval status from the constitution's approval chain",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Full approval record when constitution is approved",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["approved", "pending", "revoked"]
+                },
+                "approver_id": {
+                  "type": "string",
+                  "description": "Email or identifier of the approver"
+                },
+                "approver_role": {
+                  "type": "string",
+                  "description": "Human-readable role of the approver"
+                },
+                "approved_at": {
+                  "type": "string",
+                  "description": "ISO 8601 timestamp when approval was granted"
+                },
+                "constitution_version": {
+                  "type": "string",
+                  "description": "Human-readable constitution version"
+                },
+                "content_hash": {
+                  "type": "string",
+                  "description": "SHA-256 hash of constitution content at time of approval",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": ["status", "approver_id", "approver_role", "approved_at", "constitution_version", "content_hash"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "description": "Minimal record when constitution is unapproved",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["unapproved"]
+                }
+              },
+              "required": ["status"],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false

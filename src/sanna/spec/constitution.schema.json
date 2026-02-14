@@ -234,6 +234,21 @@
       "type": ["string", "null"],
       "description": "SHA-256 hash of canonical constitution content (set by sanna-sign-constitution or sanna-hash-constitution)",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "approval": {
+      "type": ["object", "null"],
+      "description": "Approval chain — cryptographic approval binding (v0.9.0+)",
+      "properties": {
+        "records": {
+          "type": "array",
+          "description": "List of approval records (v0.9.0 uses single record)",
+          "items": {
+            "$ref": "#/$defs/ApprovalRecord"
+          }
+        }
+      },
+      "required": ["records"],
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -311,6 +326,52 @@
         "check": {
           "type": ["string", "null"],
           "description": "Optional check implementation ID (e.g., 'sanna.context_contradiction')"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApprovalRecord": {
+      "type": "object",
+      "description": "A single approval record binding an approver to a constitution version",
+      "required": ["status", "approver_id", "approver_role", "approved_at", "approval_signature", "constitution_version", "content_hash"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Approval status",
+          "enum": ["approved", "pending", "revoked"]
+        },
+        "approver_id": {
+          "type": "string",
+          "description": "Email or identifier of the approver",
+          "minLength": 1
+        },
+        "approver_role": {
+          "type": "string",
+          "description": "Human-readable role of the approver (e.g., 'VP Risk', 'CISO')",
+          "minLength": 1
+        },
+        "approved_at": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when the approval was granted"
+        },
+        "approval_signature": {
+          "type": "string",
+          "description": "Base64-encoded Ed25519 signature of the approval record"
+        },
+        "constitution_version": {
+          "type": "string",
+          "description": "Human-readable version (e.g., '1', '2.0', '3.1-rc1')",
+          "minLength": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "description": "SHA-256 hash of constitution content at approval time",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "previous_version_hash": {
+          "type": ["string", "null"],
+          "description": "Content hash of the prior version (links versions together)",
+          "pattern": "^[a-f0-9]{64}$"
         }
       },
       "additionalProperties": false

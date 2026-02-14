@@ -36,12 +36,16 @@ from .constitution import (
     AuthorityBoundaries,
     EscalationRule,
     EscalationTargetConfig,
+    ApprovalRecord,
+    ApprovalChain,
     SannaConstitutionError,
     load_constitution,
     parse_constitution,
     validate_constitution_data,
     validate_against_schema,
     compute_constitution_hash,
+    compute_content_hash,
+    approve_constitution,
     sign_constitution,
     constitution_to_receipt_ref,
     constitution_to_signable_dict,
@@ -93,6 +97,11 @@ from .drift import (
     export_drift_report,
     export_drift_report_to_file,
 )
+from .constitution_diff import (
+    diff_constitutions,
+    DiffResult,
+    DiffEntry,
+)
 
 __all__ = [
     "__version__",
@@ -140,7 +149,11 @@ __all__ = [
     "AuthorityBoundaries",
     "EscalationRule",
     "EscalationTargetConfig",
+    "ApprovalRecord",
+    "ApprovalChain",
     "SannaConstitutionError",
+    "compute_content_hash",
+    "approve_constitution",
     "CheckConfig",
     "CustomInvariantRecord",
     "configure_checks",
@@ -175,4 +188,7 @@ __all__ = [
     "CheckDriftDetail",
     "export_drift_report",
     "export_drift_report_to_file",
+    "diff_constitutions",
+    "DiffResult",
+    "DiffEntry",
 ]

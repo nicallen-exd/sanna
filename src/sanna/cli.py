@@ -201,6 +201,7 @@ def main_verify():
     parser.add_argument("--public-key", help="Path to Ed25519 public key for receipt signature verification")
     parser.add_argument("--constitution", help="Path to constitution file for chain verification")
     parser.add_argument("--constitution-public-key", help="Path to Ed25519 public key for constitution signature verification")
+    parser.add_argument("--approver-public-key", help="Path to Ed25519 public key for approval signature verification")
     parser.add_argument("--version", action="version", version=f"sanna-verify {VERIFIER_VERSION}")
 
     args = parser.parse_args()
@@ -229,6 +230,7 @@ def main_verify():
         public_key_path=args.public_key,
         constitution_path=args.constitution,
         constitution_public_key_path=args.constitution_public_key,
+        approver_public_key_path=args.approver_public_key,
     )
 
     # Output
@@ -566,6 +568,7 @@ def main_create_bundle():
     parser.add_argument("--public-key", required=True, help="Path to Ed25519 public key (PEM)")
     parser.add_argument("--output", "-o", required=True, help="Output path for the bundle zip")
     parser.add_argument("--description", help="Human-readable description for metadata")
+    parser.add_argument("--approver-public-key", help="Path to approver's Ed25519 public key for approval verification")
     parser.add_argument("--version", action="version", version=f"sanna-create-bundle {TOOL_VERSION}")
 
     args = parser.parse_args()
@@ -578,6 +581,7 @@ def main_create_bundle():
             public_key_path=args.public_key,
             output_path=args.output,
             description=args.description,
+            approver_public_key_path=args.approver_public_key,
         )
         print(f"Bundle created: {bundle_path}")
         print(f"  Receipt:      {args.receipt}")
@@ -757,6 +761,111 @@ def main_drift_report():
     # Exit code: 1 if any fleet status is CRITICAL
     if any(r.fleet_status == "CRITICAL" for r in reports):
         return 1
+    return 0
+
+
+# =============================================================================
+# DIFF CLI
+# =============================================================================
+
+def diff_cmd():
+    """Entry point for sanna-diff command."""
+    parser = argparse.ArgumentParser(
+        description="Compare two Sanna constitutions and report governance changes"
+    )
+    parser.add_argument("old", help="Path to the old (baseline) constitution")
+    parser.add_argument("new", help="Path to the new (target) constitution")
+    parser.add_argument("--format", choices=["text", "json", "markdown"],
+                       default="text", help="Output format (default: text)")
+    parser.add_argument("--version", action="version", version=f"sanna-diff {TOOL_VERSION}")
+
+    args = parser.parse_args()
+
+    from .constitution import load_constitution
+    from .constitution_diff import diff_constitutions
+
+    try:
+        old_const = load_constitution(args.old)
+    except FileNotFoundError:
+        print(f"Error: File not found: {args.old}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error loading old constitution: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        new_const = load_constitution(args.new)
+    except FileNotFoundError:
+        print(f"Error: File not found: {args.new}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error loading new constitution: {e}", file=sys.stderr)
+        return 1
+
+    result = diff_constitutions(old_const, new_const)
+
+    if args.format == "json":
+        print(json.dumps(result.to_dict(), indent=2))
+    elif args.format == "markdown":
+        print(result.to_markdown())
+    else:
+        print(result.to_text())
+
+    return 0
+
+
+# =============================================================================
+# APPROVE CONSTITUTION CLI
+# =============================================================================
+
+def approve_constitution_cmd():
+    """Entry point for sanna-approve-constitution command."""
+    parser = argparse.ArgumentParser(
+        description="Approve a signed Sanna constitution with an Ed25519 signature"
+    )
+    parser.add_argument("constitution", help="Path to signed constitution YAML/JSON file")
+    parser.add_argument("--approver-key", required=True,
+                       help="Path to approver's Ed25519 private key (PEM)")
+    parser.add_argument("--approver-id", required=True,
+                       help="Email or identifier of the approver")
+    parser.add_argument("--approver-role", required=True,
+                       help="Human-readable role (e.g., 'VP Risk', 'CISO')")
+    parser.add_argument("--version", dest="constitution_version", required=True,
+                       help="Human-readable constitution version (e.g., '1', '2.0')")
+    parser.add_argument("--tool-version", action="version", version=f"sanna-approve-constitution {TOOL_VERSION}")
+
+    args = parser.parse_args()
+
+    from .constitution import approve_constitution, SannaConstitutionError
+
+    try:
+        record = approve_constitution(
+            constitution_path=args.constitution,
+            approver_private_key=args.approver_key,
+            approver_id=args.approver_id,
+            approver_role=args.approver_role,
+            constitution_version=args.constitution_version,
+        )
+    except SannaConstitutionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Constitution approved and written to {args.constitution}")
+    print()
+    print(f"  Approver:    {record.approver_id}")
+    print(f"  Role:        {record.approver_role}")
+    print(f"  Version:     {record.constitution_version}")
+    print(f"  Content Hash: {record.content_hash[:16]}...")
+    print(f"  Approved At: {record.approved_at}")
+    if record.previous_version_hash:
+        print(f"  Previous:    {record.previous_version_hash[:16]}...")
+
     return 0
 
 

@@ -612,7 +612,12 @@ def generate_receipt(
 
     # Serialize optional blocks for fingerprint
     halt_event_dict = asdict(halt_event) if halt_event else None
-    constitution_hash = hash_obj(constitution_dict) if constitution_dict else ""
+    # Strip mutable constitution_approval before hashing (parity with middleware/verify).
+    if constitution_dict:
+        _cref = {k: v for k, v in constitution_dict.items() if k != "constitution_approval"}
+        constitution_hash = hash_obj(_cref)
+    else:
+        constitution_hash = ""
     halt_hash = hash_obj(halt_event_dict) if halt_event_dict else ""
 
     # Stable fingerprint for diffs/golden tests (doesn't change across runs of same trace)

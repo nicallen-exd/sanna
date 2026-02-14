@@ -67,15 +67,23 @@ def create_bundle(
     public_key_path: str | Path,
     output_path: str | Path,
     description: Optional[str] = None,
+    approver_public_key_path: Optional[str | Path] = None,
+    constitution_public_key_path: Optional[str | Path] = None,
 ) -> Path:
     """Create an evidence bundle zip archive.
 
     Args:
         receipt_path: Path to a signed receipt JSON file.
         constitution_path: Path to a signed constitution YAML/JSON file.
-        public_key_path: Path to the Ed25519 public key PEM file.
+        public_key_path: Path to the Ed25519 public key PEM file (for receipt).
         output_path: Output path for the bundle zip.
         description: Optional human-readable note for metadata.
+        approver_public_key_path: Path to the approver's Ed25519 public key
+            PEM file. When provided, included in the bundle for offline
+            approval verification.
+        constitution_public_key_path: Path to the constitution author's Ed25519
+            public key PEM file. When the constitution was signed by a different
+            key than the receipt, provide this so the bundle includes both keys.
 
     Returns:
         Path to the created bundle.
@@ -149,6 +157,34 @@ def create_bundle(
         "description": description or "",
     }
 
+    # v0.9.0: Add approval metadata
+    approval_block = const_data.get("approval")
+    if approval_block and approval_block.get("records"):
+        current = approval_block["records"][-1]
+        metadata["approval_status"] = current.get("status", "unapproved")
+        metadata["approver_id"] = current.get("approver_id")
+        metadata["approver_role"] = current.get("approver_role")
+        metadata["approved_at"] = current.get("approved_at")
+        metadata["constitution_version"] = current.get("constitution_version")
+        metadata["content_hash"] = current.get("content_hash")
+    else:
+        metadata["approval_status"] = "unapproved"
+
+    # v0.9.0: Build governance_summary
+    governance_summary = {
+        "constitution_author": prov.get("authored_by"),
+    }
+    if metadata["approval_status"] == "approved":
+        approver = metadata.get("approver_id", "")
+        role = metadata.get("approver_role", "")
+        governance_summary["constitution_approved_by"] = f"{approver} ({role})" if role else approver
+        governance_summary["constitution_version"] = metadata.get("constitution_version")
+        governance_summary["approval_date"] = metadata.get("approved_at")
+    governance_summary["constitution_approval_verified"] = (
+        metadata["approval_status"] == "approved" and approver_public_key_path is not None
+    )
+    metadata["governance_summary"] = governance_summary
+
     # Create zip archive
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("receipt.json", receipt_text)
@@ -157,6 +193,31 @@ def create_bundle(
             f"public_keys/{key_id}.pub",
             public_key_path.read_text(encoding="utf-8"),
         )
+
+        # v0.9.0: Include constitution author's public key if different
+        if constitution_public_key_path is not None:
+            const_pub_path = Path(constitution_public_key_path)
+            if const_pub_path.exists():
+                const_pub_key = load_public_key(const_pub_path)
+                const_key_id = compute_key_id(const_pub_key)
+                if const_key_id != key_id:
+                    zf.writestr(
+                        f"public_keys/{const_key_id}.pub",
+                        const_pub_path.read_text(encoding="utf-8"),
+                    )
+
+        # v0.9.0: Include approver's public key if provided
+        if approver_public_key_path is not None:
+            approver_pub_path = Path(approver_public_key_path)
+            if approver_pub_path.exists():
+                approver_pub_key = load_public_key(approver_pub_path)
+                approver_key_id = compute_key_id(approver_pub_key)
+                if approver_key_id != key_id:
+                    zf.writestr(
+                        f"public_keys/{approver_key_id}.pub",
+                        approver_pub_path.read_text(encoding="utf-8"),
+                    )
+
         zf.writestr("metadata.json", json.dumps(metadata, indent=2))
 
     logger.info("Bundle created: %s (key_id=%s)", output_path, key_id[:16])
@@ -173,7 +234,7 @@ def verify_bundle(
 ) -> BundleVerificationResult:
     """Verify an evidence bundle's integrity.
 
-    Runs six verification steps:
+    Runs seven verification steps:
 
     1. **Bundle structure** — required files present in the zip.
     2. **Receipt schema** — receipt validates against JSON schema.
@@ -181,6 +242,7 @@ def verify_bundle(
     4. **Constitution signature** — Ed25519 signature valid.
     5. **Provenance chain** — receipt→constitution binding intact.
     6. **Receipt signature** — Ed25519 signature valid.
+    7. **Approval verification** — approval content hash and signature.
 
     Args:
         bundle_path: Path to the bundle zip file.
@@ -320,21 +382,24 @@ def verify_bundle(
             "constitution_version": const_ref.get("version"),
         }
 
-        # Find public key file — match by key_id from receipt signature
+        # Resolve public keys independently by key_id
         pub_key_files = list(public_keys_dir.glob("*.pub"))
+
+        def _resolve_key(key_id: str) -> Optional[str]:
+            """Find a public key file matching the given key_id."""
+            if key_id:
+                for pkf in pub_key_files:
+                    if pkf.stem == key_id:
+                        return str(pkf)
+            return None
+
+        # Receipt key — from receipt_signature.key_id
         sig_block = receipt.get("receipt_signature") or {}
         receipt_key_id = sig_block.get("key_id", "")
-
-        pub_key_path = None
-        if receipt_key_id:
-            # Match by key_id (filename stem is the key_id)
-            for pkf in pub_key_files:
-                if pkf.stem == receipt_key_id:
-                    pub_key_path = str(pkf)
-                    break
-        if pub_key_path is None:
+        receipt_pub_key_path = _resolve_key(receipt_key_id)
+        if receipt_pub_key_path is None:
             # Fallback to first .pub file
-            pub_key_path = str(pub_key_files[0])
+            receipt_pub_key_path = str(pub_key_files[0])
 
         # ---- Step 2: Receipt schema ----
         from .verify import load_schema, verify_receipt as _verify_receipt
@@ -396,8 +461,15 @@ def verify_bundle(
         if constitution is not None:
             sig = constitution.provenance.signature
             if sig and sig.value:
+                # Resolve constitution key by its own key_id
+                const_key_id = sig.key_id or ""
+                const_pub_key_path = _resolve_key(const_key_id)
+                if const_pub_key_path is None:
+                    # Fallback to receipt key (same author for both)
+                    const_pub_key_path = receipt_pub_key_path
+
                 try:
-                    const_valid = verify_constitution_full(constitution, pub_key_path)
+                    const_valid = verify_constitution_full(constitution, const_pub_key_path)
                 except Exception as e:
                     const_valid = False
 
@@ -443,7 +515,7 @@ def verify_bundle(
         sig_block = receipt.get("receipt_signature")
         if sig_block and sig_block.get("signature"):
             try:
-                receipt_sig_valid = verify_receipt_signature(receipt, pub_key_path)
+                receipt_sig_valid = verify_receipt_signature(receipt, receipt_pub_key_path)
             except Exception:
                 receipt_sig_valid = False
 
@@ -464,6 +536,13 @@ def verify_bundle(
                 "Receipt has no signature",
             ))
             errors.append("Receipt is not signed")
+
+        # ---- Step 7: Approval verification (v0.9.0) ----
+        if constitution is not None:
+            approval_check = _verify_approval_in_bundle(
+                constitution, public_keys_dir,
+            )
+            checks.append(approval_check)
 
     # ---- Compute verdict ----
     if strict:
@@ -486,6 +565,89 @@ def verify_bundle(
 # =============================================================================
 # INTERNAL HELPERS
 # =============================================================================
+
+def _verify_approval_in_bundle(constitution, public_keys_dir: Path) -> BundleCheck:
+    """Verify the constitution approval within a bundle.
+
+    Checks:
+    1. If constitution has approval, content_hash matches.
+    2. If approver public key is in the bundle, verifies approval signature.
+
+    Returns a single BundleCheck.
+    """
+    from .constitution import compute_content_hash, _approval_record_to_signable_dict
+    from .hashing import canonical_json_bytes
+
+    approval = constitution.approval
+    if approval is None or approval.current is None:
+        return BundleCheck(
+            "Approval verification", True,
+            "Constitution has no approval block (not required)",
+        )
+
+    record = approval.current
+
+    if record.status != "approved":
+        return BundleCheck(
+            "Approval verification", False,
+            f"Approval status is '{record.status}', not 'approved'",
+        )
+
+    # CRITICAL: Require non-empty approval_signature when status=="approved"
+    if not record.approval_signature:
+        return BundleCheck(
+            "Approval verification", False,
+            "Approval record claims 'approved' but approval_signature is missing/empty",
+        )
+
+    # Verify content_hash
+    computed_hash = compute_content_hash(constitution)
+    if record.content_hash != computed_hash:
+        return BundleCheck(
+            "Approval verification", False,
+            f"Content hash mismatch: approval has {record.content_hash[:16]}..., "
+            f"computed {computed_hash[:16]}... — content may have been tampered",
+        )
+
+    # Try to verify approval signature with available public keys
+    if public_keys_dir.exists():
+        from .crypto import verify_signature, load_public_key
+        signable = _approval_record_to_signable_dict(record)
+        data = canonical_json_bytes(signable)
+
+        pub_key_files = list(public_keys_dir.glob("*.pub"))
+        sig_verified = False
+        for pkf in pub_key_files:
+            try:
+                pub_key = load_public_key(str(pkf))
+                if verify_signature(data, record.approval_signature, pub_key):
+                    sig_verified = True
+                    break
+            except Exception:
+                continue
+
+        if sig_verified:
+            approver = record.approver_id
+            role = record.approver_role
+            return BundleCheck(
+                "Approval verification", True,
+                f"Approved by {approver} ({role}), content hash valid, signature verified",
+            )
+        else:
+            return BundleCheck(
+                "Approval verification", True,
+                f"Approved by {record.approver_id}, content hash valid. "
+                f"WARNING: Approval signature present but no approver public key in bundle "
+                f"— signature not verified. Include approver key for full verification.",
+            )
+
+    return BundleCheck(
+        "Approval verification", True,
+        f"Approved by {record.approver_id}, content hash valid. "
+        f"WARNING: Approval signature present but no approver public key in bundle "
+        f"— signature not verified. Include approver key for full verification.",
+    )
+
 
 def _verify_provenance_chain(receipt: dict, constitution) -> list[str]:
     """Verify receipt-to-constitution provenance binding.

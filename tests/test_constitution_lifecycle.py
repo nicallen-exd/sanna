@@ -358,7 +358,7 @@ class TestReceiptRef:
         assert "approved_by" in ref
         assert "approval_date" in ref
         assert "approval_method" in ref
-        assert len(ref) == 6
+        assert "constitution_approval" in ref
 
     def test_receipt_ref_document_id_format(self):
         ref = constitution_to_receipt_ref(_signed_constitution())

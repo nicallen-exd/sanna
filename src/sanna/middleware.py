@@ -453,7 +453,13 @@ def _generate_constitution_receipt(
     context_hash = hash_obj(inputs)
     output_hash = hash_obj(outputs)
 
-    constitution_hash_val = hash_obj(constitution_ref) if constitution_ref else ""
+    # Strip mutable constitution_approval before hashing — approval can change
+    # without invalidating the fingerprint (verified separately).
+    if constitution_ref:
+        _cref = {k: v for k, v in constitution_ref.items() if k != "constitution_approval"}
+        constitution_hash_val = hash_obj(_cref)
+    else:
+        constitution_hash_val = ""
     halt_event_dict = asdict(halt_event) if halt_event else None
     halt_hash_val = hash_obj(halt_event_dict) if halt_event_dict else ""
 
@@ -543,7 +549,12 @@ def _generate_no_invariants_receipt(
     context_hash = hash_obj(inputs)
     output_hash = hash_obj(outputs)
 
-    constitution_hash_val = hash_obj(constitution_ref) if constitution_ref else ""
+    # Strip mutable constitution_approval before hashing (parity with verify.py).
+    if constitution_ref:
+        _cref = {k: v for k, v in constitution_ref.items() if k != "constitution_approval"}
+        constitution_hash_val = hash_obj(_cref)
+    else:
+        constitution_hash_val = ""
 
     checks_hash = hash_obj([])
     fingerprint_input = f"{trace_data['trace_id']}|{context_hash}|{output_hash}|{CHECKS_VERSION}|{checks_hash}|{constitution_hash_val}|"

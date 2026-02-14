@@ -617,6 +617,220 @@ def _query_drift(
 
 
 # =============================================================================
+# TOOL: check_constitution_approval
+# =============================================================================
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+def check_constitution_approval(
+    constitution_path: str,
+    author_public_key_path: str = "",
+    approver_public_key_path: str = "",
+) -> str:
+    """Verify the approval status of a Sanna constitution.
+
+    Returns approval details including who approved, when, and whether
+    the approval is still valid (content hasn't been tampered with).
+    Distinguishes between "present" and "verified" for signatures.
+
+    Args:
+        constitution_path: Path to the constitution YAML/JSON file.
+        author_public_key_path: Optional path to author's public key
+            for Ed25519 signature verification.
+        approver_public_key_path: Optional path to approver's public key
+            for approval signature verification.
+
+    Returns:
+        JSON string with approval status, approver details, signature
+        presence/verification, and content hash validity.
+    """
+    try:
+        from sanna.constitution import (
+            load_constitution,
+            compute_content_hash,
+            _approval_record_to_signable_dict,
+            SannaConstitutionError,
+        )
+        from sanna.crypto import verify_constitution_full, verify_signature, load_public_key
+        from sanna.hashing import canonical_json_bytes
+
+        try:
+            constitution = load_constitution(constitution_path)
+        except FileNotFoundError:
+            return json.dumps({
+                "approved": False,
+                "reason": f"Constitution file not found: {constitution_path}",
+            })
+        except (SannaConstitutionError, ValueError) as e:
+            return json.dumps({
+                "approved": False,
+                "reason": f"Failed to load constitution: {e}",
+            })
+
+        # Author signature: present vs verified
+        sig = constitution.provenance.signature
+        author_sig_present = bool(sig and sig.value)
+        author_sig_verified = None  # null = no key provided
+        if author_public_key_path and author_sig_present:
+            try:
+                author_sig_verified = verify_constitution_full(
+                    constitution, author_public_key_path
+                )
+            except Exception:
+                author_sig_verified = False
+
+        # Check approval
+        approval = constitution.approval
+        if approval is None or approval.current is None:
+            return json.dumps({
+                "approved": False,
+                "approval_status": "unapproved",
+                "reason": (
+                    "Constitution has no approval record. "
+                    "Run sanna-approve-constitution to approve."
+                ),
+                "author_signature": {
+                    "present": author_sig_present,
+                    "verified": author_sig_verified,
+                },
+            })
+
+        record = approval.current
+
+        if record.status != "approved":
+            return json.dumps({
+                "approved": False,
+                "approval_status": record.status,
+                "reason": f"Approval status is '{record.status}', not 'approved'.",
+                "author_signature": {
+                    "present": author_sig_present,
+                    "verified": author_sig_verified,
+                },
+            })
+
+        # Require non-empty approval_signature for approved=True
+        approval_sig_present = bool(record.approval_signature)
+        if not approval_sig_present:
+            return json.dumps({
+                "approved": False,
+                "approval_status": record.status,
+                "reason": (
+                    "Approval record claims 'approved' but approval_signature "
+                    "is missing/empty."
+                ),
+                "author_signature": {
+                    "present": author_sig_present,
+                    "verified": author_sig_verified,
+                },
+                "approval_signature": {
+                    "present": False,
+                    "verified": None,
+                },
+            })
+
+        # Verify content hash
+        computed_hash = compute_content_hash(constitution)
+        content_hash_valid = record.content_hash == computed_hash
+
+        if not content_hash_valid:
+            return json.dumps({
+                "approved": False,
+                "approval_status": record.status,
+                "reason": (
+                    "Constitution content has been modified since approval. "
+                    "Content hash mismatch."
+                ),
+                "content_hash_valid": False,
+                "expected_hash": record.content_hash,
+                "actual_hash": computed_hash,
+                "author_signature": {
+                    "present": author_sig_present,
+                    "verified": author_sig_verified,
+                },
+                "approval_signature": {
+                    "present": approval_sig_present,
+                    "verified": None,
+                },
+            })
+
+        # Approval signature: present vs verified
+        approval_sig_verified = None  # null = no key provided
+        if approver_public_key_path and approval_sig_present:
+            try:
+                pub_key = load_public_key(approver_public_key_path)
+                signable = _approval_record_to_signable_dict(record)
+                data = canonical_json_bytes(signable)
+                approval_sig_verified = verify_signature(
+                    data, record.approval_signature, pub_key
+                )
+            except Exception:
+                approval_sig_verified = False
+
+        # If keys provided and verification failed, report not approved
+        if author_public_key_path and author_sig_verified is False:
+            return json.dumps({
+                "approved": False,
+                "approval_status": record.status,
+                "reason": "Author signature verification failed.",
+                "content_hash_valid": content_hash_valid,
+                "author_signature": {
+                    "present": author_sig_present,
+                    "verified": False,
+                },
+                "approval_signature": {
+                    "present": approval_sig_present,
+                    "verified": approval_sig_verified,
+                },
+            })
+
+        if approver_public_key_path and approval_sig_verified is False:
+            return json.dumps({
+                "approved": False,
+                "approval_status": record.status,
+                "reason": "Approval signature verification failed.",
+                "content_hash_valid": content_hash_valid,
+                "author_signature": {
+                    "present": author_sig_present,
+                    "verified": author_sig_verified,
+                },
+                "approval_signature": {
+                    "present": approval_sig_present,
+                    "verified": False,
+                },
+            })
+
+        return json.dumps({
+            "approved": True,
+            "approval_status": record.status,
+            "approver_id": record.approver_id,
+            "approver_role": record.approver_role,
+            "approved_at": record.approved_at,
+            "constitution_version": record.constitution_version,
+            "content_hash_valid": content_hash_valid,
+            "author_signature": {
+                "present": author_sig_present,
+                "verified": author_sig_verified,
+            },
+            "approval_signature": {
+                "present": approval_sig_present,
+                "verified": approval_sig_verified,
+            },
+        })
+
+    except Exception as e:
+        logger.exception("check_constitution_approval failed")
+        return json.dumps({
+            "approved": False,
+            "reason": f"Internal error: {e}",
+        })
+
+
+# =============================================================================
 # SERVER RUNNER
 # =============================================================================
 

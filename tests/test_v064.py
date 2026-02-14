@@ -263,7 +263,7 @@ class TestChainVerificationSignatureBinding:
         receipt = result.receipt
 
         # Verify receipt against constitution B — should detect different signature
-        errors = verify_constitution_chain(receipt, str(path_b), str(pub_b))
+        errors, _ = verify_constitution_chain(receipt, str(path_b), str(pub_b))
         assert len(errors) > 0
         assert any("mismatch" in e.lower() or "different" in e.lower() for e in errors)
 
@@ -283,7 +283,7 @@ class TestChainVerificationSignatureBinding:
         receipt = result.receipt
 
         # Chain verification without keys should pass (hash bond only)
-        errors = verify_constitution_chain(receipt, str(path))
+        errors, _ = verify_constitution_chain(receipt, str(path))
         assert errors == [], f"Unexpected errors: {errors}"
 
     def test_signature_scheme_mismatch_detected(self, tmp_path):
@@ -302,7 +302,7 @@ class TestChainVerificationSignatureBinding:
         # Tamper receipt's scheme
         if receipt.get("constitution_ref", {}).get("scheme"):
             receipt["constitution_ref"]["scheme"] = "fake_scheme_v99"
-            errors = verify_constitution_chain(receipt, str(path))
+            errors, _ = verify_constitution_chain(receipt, str(path))
             assert any("scheme" in e.lower() for e in errors)
 
 
@@ -414,14 +414,14 @@ class TestPrivateKeyPermissions:
 
 class TestV064Versions:
     def test_tool_version(self):
-        assert TOOL_VERSION == "0.8.2"
+        assert TOOL_VERSION == "0.9.0"
 
     def test_checks_version(self):
         assert CHECKS_VERSION == "4"
 
     def test_init_version(self):
         import sanna
-        assert sanna.__version__ == "0.8.2"
+        assert sanna.__version__ == "0.9.0"
 
     def test_sanitize_for_signing_exported(self):
         """sanitize_for_signing should be importable from the top-level package."""

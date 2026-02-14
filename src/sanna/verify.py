@@ -139,7 +139,12 @@ def verify_fingerprint(receipt: dict) -> tuple:
     constitution_ref = receipt.get("constitution_ref")
     halt_event = receipt.get("halt_event")
     evaluation_coverage = receipt.get("evaluation_coverage")
-    constitution_hash = hash_obj(constitution_ref) if constitution_ref else ""
+    # Strip mutable constitution_approval before hashing (parity with middleware.py).
+    if constitution_ref:
+        _cref = {k: v for k, v in constitution_ref.items() if k != "constitution_approval"}
+        constitution_hash = hash_obj(_cref)
+    else:
+        constitution_hash = ""
     halt_hash = hash_obj(halt_event) if halt_event else ""
 
     # v0.6.1: include evaluation_coverage in fingerprint if present
@@ -278,6 +283,7 @@ def verify_constitution_chain(
     receipt: dict,
     constitution_path: str,
     constitution_public_key_path: str | None = None,
+    approver_public_key_path: str | None = None,
 ) -> list:
     """Verify the receipt-constitution chain.
 
@@ -286,28 +292,29 @@ def verify_constitution_chain(
     2. receipt.constitution_ref.policy_hash matches constitution.
     3. If public key provided, verifies constitution Ed25519 signature.
     4. If constitution_ref.key_id exists, matches constitution's key_id.
+    5. If constitution has approval, verifies content_hash and (optionally) approval signature.
 
     Returns list of error strings.
     """
     errors = []
 
-    from .constitution import load_constitution, compute_constitution_hash, SannaConstitutionError
+    from .constitution import load_constitution, compute_constitution_hash, compute_content_hash, SannaConstitutionError
 
     try:
         constitution = load_constitution(constitution_path)
     except SannaConstitutionError as e:
         errors.append(f"Constitution integrity check failed: {e}")
-        return errors
+        return errors, []
     except FileNotFoundError as e:
         errors.append(f"Constitution not found: {e}")
-        return errors
+        return errors, []
     except ValueError as e:
         errors.append(f"Constitution validation failed: {e}")
-        return errors
+        return errors, []
 
     if not constitution.policy_hash:
         errors.append("Constitution is not signed (no policy_hash)")
-        return errors
+        return errors, []
 
     # Verify policy_hash matches
     computed = compute_constitution_hash(constitution)
@@ -363,7 +370,106 @@ def verify_constitution_chain(
                         f"constitution has key_id={sig.key_id}"
                     )
 
-    return errors
+    # v0.9.0: Verify approval chain
+    approval_errors, approval_warnings = _verify_approval_chain(
+        receipt, constitution, approver_public_key_path,
+    )
+    errors.extend(approval_errors)
+
+    return errors, approval_warnings
+
+
+def _verify_approval_chain(
+    receipt: dict,
+    constitution,
+    approver_public_key_path: str | None = None,
+) -> tuple[list, list]:
+    """Verify the constitution approval chain.
+
+    Checks:
+    1. If constitution has approval, content_hash matches recomputed value.
+    2. If approver public key provided, verify approval Ed25519 signature.
+    3. Receipt's constitution_approval matches constitution's approval.
+
+    Returns (errors, warnings) tuple.
+    """
+    from .constitution import compute_content_hash, _approval_record_to_signable_dict
+    from .hashing import canonical_json_bytes
+
+    errors = []
+    warnings = []
+    approval = constitution.approval
+    const_ref = receipt.get("constitution_ref") or {}
+    receipt_approval = const_ref.get("constitution_approval")
+
+    if approval is not None and approval.current is not None:
+        record = approval.current
+
+        # 1. Verify content_hash matches
+        computed_hash = compute_content_hash(constitution)
+        if record.content_hash != computed_hash:
+            errors.append(
+                f"Approval content_hash mismatch: recorded {record.content_hash[:16]}..., "
+                f"computed {computed_hash[:16]}... — constitution content may have been tampered"
+            )
+
+        # 2. Verify approval status — pending/revoked are warnings, not errors
+        if record.status not in ("approved", "pending", "revoked"):
+            errors.append(
+                f"Constitution approval status is '{record.status}' — unknown status"
+            )
+        elif record.status in ("pending", "revoked"):
+            warnings.append(
+                f"Constitution approval status is '{record.status}', not 'approved'"
+            )
+
+        # 3. Verify approval signature (if approver public key provided)
+        if approver_public_key_path:
+            if not record.approval_signature:
+                errors.append(
+                    "Constitution approval has no signature but --approver-public-key was provided"
+                )
+            else:
+                from .crypto import verify_signature, load_public_key
+                try:
+                    pub_key = load_public_key(approver_public_key_path)
+                    signable = _approval_record_to_signable_dict(record)
+                    data = canonical_json_bytes(signable)
+                    valid = verify_signature(data, record.approval_signature, pub_key)
+                    if not valid:
+                        errors.append("Approval signature verification FAILED")
+                except Exception as e:
+                    errors.append(f"Approval signature verification error: {e}")
+        elif record.status == "approved" and record.approval_signature:
+            warnings.append(
+                "Approval signature present but no --approver-public-key provided "
+                "— signature not verified"
+            )
+
+        # 4. Cross-check receipt's constitution_approval if present
+        if receipt_approval:
+            if receipt_approval.get("content_hash") != record.content_hash:
+                errors.append(
+                    "Receipt constitution_approval.content_hash does not match "
+                    "constitution's approval record"
+                )
+            if receipt_approval.get("status") != record.status:
+                errors.append(
+                    "Receipt constitution_approval.status does not match "
+                    "constitution's approval record"
+                )
+    else:
+        # Constitution has no approval — receipt should say "unapproved"
+        if receipt_approval:
+            if receipt_approval.get("status") == "unapproved":
+                pass  # Expected: unapproved constitution, receipt says unapproved
+            else:
+                errors.append(
+                    "Receipt references a constitution_approval but constitution "
+                    "has no approval block"
+                )
+
+    return errors, warnings
 
 
 def verify_receipt(
@@ -372,6 +478,7 @@ def verify_receipt(
     public_key_path: str | None = None,
     constitution_path: str | None = None,
     constitution_public_key_path: str | None = None,
+    approver_public_key_path: str | None = None,
 ) -> VerificationResult:
     """
     Full receipt verification.
@@ -447,8 +554,12 @@ def verify_receipt(
 
     # 8. Constitution chain verification (if constitution path provided)
     if constitution_path:
-        chain_errors = verify_constitution_chain(receipt, constitution_path, constitution_public_key_path)
+        chain_errors, chain_warnings = verify_constitution_chain(
+            receipt, constitution_path, constitution_public_key_path,
+            approver_public_key_path=approver_public_key_path,
+        )
         errors.extend(chain_errors)
+        warnings.extend(chain_warnings)
 
     # Determine result
     if not fp_match:
