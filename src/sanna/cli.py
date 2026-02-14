@@ -680,12 +680,16 @@ def main_drift_report():
                        help="Projection horizon in days (default: 90)")
     parser.add_argument("--json", action="store_true",
                        help="Machine-readable JSON output")
+    parser.add_argument("--export", choices=["json", "csv"], default=None,
+                       help="Export format (json or csv)")
+    parser.add_argument("--output", default=None,
+                       help="Output file path (used with --export)")
     parser.add_argument("--version", action="version", version=f"sanna-drift-report {TOOL_VERSION}")
 
     args = parser.parse_args()
 
     from .store import ReceiptStore
-    from .drift import DriftAnalyzer, format_drift_report
+    from .drift import DriftAnalyzer, format_drift_report, export_drift_report, export_drift_report_to_file
 
     if not Path(args.db).exists():
         print(f"Error: Receipt store not found: {args.db}", file=sys.stderr)
@@ -717,7 +721,16 @@ def main_drift_report():
             )
             reports.append(report)
 
-    if args.json:
+    # Export mode: write to file or stdout in requested format
+    if args.export:
+        if args.output:
+            for report in reports:
+                export_drift_report_to_file(report, args.output, fmt=args.export)
+            print(f"Exported {len(reports)} report(s) to {args.output}")
+        else:
+            for report in reports:
+                print(export_drift_report(report, fmt=args.export))
+    elif args.json:
         from dataclasses import asdict
         print(json.dumps([asdict(r) for r in reports], indent=2))
     else:

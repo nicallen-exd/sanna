@@ -357,3 +357,125 @@ class TestEvaluateAction:
 class TestServerObject:
     def test_server_name(self):
         assert mcp.name == "sanna_mcp"
+
+
+# =============================================================================
+# 8. sanna_query_receipts
+# =============================================================================
+
+from sanna.mcp.server import sanna_query_receipts
+from sanna.store import ReceiptStore
+
+
+def _store_receipt(store, agent_name, status="PASS", ts_offset_h=0):
+    """Build and save a minimal receipt to the store."""
+    from datetime import datetime, timedelta, timezone
+    ts = datetime.now(timezone.utc) - timedelta(hours=ts_offset_h)
+    receipt = {
+        "receipt_id": f"r-{agent_name}-{ts_offset_h}-{status}",
+        "trace_id": f"t-{ts_offset_h}",
+        "timestamp": ts.isoformat(),
+        "coherence_status": status,
+        "constitution_ref": {
+            "document_id": f"{agent_name}/v1",
+            "policy_hash": "abc123",
+        },
+        "checks": [
+            {
+                "check_id": "C1",
+                "name": "Context Contradiction",
+                "passed": status == "PASS",
+                "status": status,
+                "severity": "critical",
+                "evidence": {},
+                "details": "",
+            }
+        ],
+    }
+    store.save(receipt)
+
+
+class TestQueryReceipts:
+    def test_missing_db_returns_error(self):
+        result = json.loads(sanna_query_receipts(db_path="/nonexistent/db.sqlite"))
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    def test_query_returns_receipts(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        store = ReceiptStore(db)
+        _store_receipt(store, "test-agent")
+        store.close()
+
+        result = json.loads(sanna_query_receipts(db_path=db))
+        assert result["count"] == 1
+        assert len(result["receipts"]) == 1
+
+    def test_query_filter_by_agent(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        store = ReceiptStore(db)
+        _store_receipt(store, "agent-a")
+        _store_receipt(store, "agent-b")
+        store.close()
+
+        result = json.loads(sanna_query_receipts(db_path=db, agent_id="agent-a"))
+        assert result["count"] == 1
+        assert result["receipts"][0]["constitution_ref"]["document_id"].startswith("agent-a")
+
+    def test_query_filter_by_status(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        store = ReceiptStore(db)
+        _store_receipt(store, "agent-a", status="PASS")
+        _store_receipt(store, "agent-a", status="FAIL", ts_offset_h=1)
+        store.close()
+
+        result = json.loads(sanna_query_receipts(db_path=db, status="FAIL"))
+        assert result["count"] == 1
+        assert result["receipts"][0]["coherence_status"] == "FAIL"
+
+    def test_query_limit(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        store = ReceiptStore(db)
+        for i in range(10):
+            _store_receipt(store, "agent-a", ts_offset_h=i)
+        store.close()
+
+        result = json.loads(sanna_query_receipts(db_path=db, limit=3))
+        assert result["count"] == 3
+        assert result["truncated"] is True
+
+    def test_query_drift_analysis(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        store = ReceiptStore(db)
+        for i in range(6):
+            _store_receipt(store, "agent-a", status="PASS" if i % 2 == 0 else "FAIL", ts_offset_h=i)
+        store.close()
+
+        result = json.loads(sanna_query_receipts(db_path=db, analysis="drift"))
+        assert result["analysis"] == "drift"
+        assert "report" in result
+        assert "fleet_status" in result["report"]
+
+    def test_query_halt_only(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        store = ReceiptStore(db)
+        # Save a non-halt receipt
+        _store_receipt(store, "agent-a")
+        # Save a halt receipt
+        halt_receipt = {
+            "receipt_id": "r-halt-1",
+            "trace_id": "t-halt",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "coherence_status": "FAIL",
+            "constitution_ref": {
+                "document_id": "agent-a/v1",
+                "policy_hash": "abc123",
+            },
+            "halt_event": {"halted": True, "reason": "test"},
+            "checks": [],
+        }
+        store.save(halt_receipt)
+        store.close()
+
+        result = json.loads(sanna_query_receipts(db_path=db, halt_only=True))
+        assert result["count"] == 1

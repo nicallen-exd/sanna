@@ -90,6 +90,8 @@ from .drift import (
     DriftReport,
     AgentDriftSummary,
     CheckDriftDetail,
+    export_drift_report,
+    export_drift_report_to_file,
 )
 
 __all__ = [
@@ -171,4 +173,6 @@ __all__ = [
     "DriftReport",
     "AgentDriftSummary",
     "CheckDriftDetail",
+    "export_drift_report",
+    "export_drift_report_to_file",
 ]

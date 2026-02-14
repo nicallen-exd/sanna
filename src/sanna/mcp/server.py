@@ -1,6 +1,6 @@
 """
 Sanna MCP server — exposes receipt verification, generation, check listing,
-and action evaluation as MCP tools over stdio transport.
+action evaluation, and receipt querying as MCP tools over stdio transport.
 
 Usage:
     python -m sanna.mcp          # stdio transport (Claude Desktop, Cursor)
@@ -11,6 +11,7 @@ Tools:
     sanna_generate_receipt   — Generate a receipt from query/context/response
     sanna_list_checks        — List all C1-C5 checks and their descriptions
     sanna_evaluate_action    — Authority boundary enforcement
+    sanna_query_receipts     — Query stored receipts with filters / drift analysis
 """
 
 from __future__ import annotations
@@ -462,6 +463,156 @@ def sanna_evaluate_action(
             "error": f"Internal error: {e}",
             "decision": None,
         })
+
+
+# =============================================================================
+# TOOL: sanna_query_receipts
+# =============================================================================
+
+MAX_QUERY_LIMIT = 500  # maximum receipts returned per query
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+def sanna_query_receipts(
+    db_path: str = ".sanna/receipts.db",
+    agent_id: str | None = None,
+    status: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    halt_only: bool = False,
+    limit: int = 100,
+    analysis: str | None = None,
+) -> str:
+    """Query stored Sanna receipts or run drift analysis.
+
+    By default, returns matching receipts from the SQLite receipt store.
+    When ``analysis="drift"``, runs drift analytics instead and returns
+    a drift report.
+
+    Args:
+        db_path: Path to the receipt store SQLite database.
+        agent_id: Filter to a specific agent.
+        status: Filter to a specific coherence status (PASS, FAIL, WARN, etc.).
+        since: ISO-8601 timestamp — only receipts after this time.
+        until: ISO-8601 timestamp — only receipts before this time.
+        halt_only: If true, only return receipts with halt events.
+        limit: Maximum number of receipts to return (max 500).
+        analysis: Set to ``"drift"`` to run drift analysis instead of
+            raw receipt query.
+
+    Returns:
+        JSON string with query results or drift report.
+    """
+    try:
+        import os
+        if not os.path.exists(db_path):
+            return json.dumps({
+                "error": f"Receipt store not found: {db_path}",
+                "receipts": None,
+            })
+
+        from sanna.store import ReceiptStore
+
+        store = ReceiptStore(db_path)
+
+        try:
+            if analysis == "drift":
+                return _query_drift(store, agent_id=agent_id, since=since)
+
+            return _query_receipts(
+                store,
+                agent_id=agent_id,
+                status=status,
+                since=since,
+                until=until,
+                halt_only=halt_only,
+                limit=min(limit, MAX_QUERY_LIMIT),
+            )
+        finally:
+            store.close()
+
+    except Exception as e:
+        logger.exception("sanna_query_receipts failed")
+        return json.dumps({
+            "error": f"Internal error: {e}",
+            "receipts": None,
+        })
+
+
+def _query_receipts(
+    store,
+    *,
+    agent_id: str | None,
+    status: str | None,
+    since: str | None,
+    until: str | None,
+    halt_only: bool,
+    limit: int,
+) -> str:
+    """Execute a filtered receipt query and return JSON."""
+    filters: dict = {}
+    if agent_id:
+        filters["agent_id"] = agent_id
+    if status:
+        filters["status"] = status
+    if since:
+        filters["since"] = since
+    if until:
+        filters["until"] = until
+    if halt_only:
+        filters["halt_event"] = True
+
+    receipts = store.query(**filters)
+
+    # Apply limit
+    truncated = len(receipts) > limit
+    receipts = receipts[:limit]
+
+    return json.dumps({
+        "count": len(receipts),
+        "truncated": truncated,
+        "receipts": receipts,
+    }, indent=2)
+
+
+def _query_drift(
+    store,
+    *,
+    agent_id: str | None,
+    since: str | None,
+) -> str:
+    """Run drift analysis and return JSON."""
+    from dataclasses import asdict
+    from sanna.drift import DriftAnalyzer
+
+    analyzer = DriftAnalyzer(store)
+
+    # Determine window from 'since' if provided, else default 30 days
+    window_days = 30
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            now = datetime.now(timezone.utc)
+            delta = now - since_dt
+            window_days = max(1, int(delta.total_seconds() / 86400))
+        except (ValueError, TypeError):
+            pass
+
+    report = analyzer.analyze(
+        window_days=window_days,
+        agent_id=agent_id,
+    )
+
+    return json.dumps({
+        "analysis": "drift",
+        "report": asdict(report),
+    }, indent=2)
 
 
 # =============================================================================

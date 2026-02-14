@@ -7,9 +7,13 @@ threshold breach projection.  Pure Python — no numpy/scipy/pandas.
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from .store import ReceiptStore
@@ -250,6 +254,40 @@ class DriftAnalyzer:
             for w in windows
         ]
 
+    def export(
+        self,
+        report: DriftReport,
+        fmt: str = "json",
+    ) -> str:
+        """Export a drift report as a JSON or CSV string.
+
+        Args:
+            report: A :class:`DriftReport` to export.
+            fmt: ``"json"`` or ``"csv"``.
+
+        Returns:
+            The serialised report.
+        """
+        return export_drift_report(report, fmt=fmt)
+
+    def export_to_file(
+        self,
+        report: DriftReport,
+        path: str,
+        fmt: str = "json",
+    ) -> str:
+        """Export a drift report to a file.
+
+        Args:
+            report: A :class:`DriftReport` to export.
+            path: Destination file path.
+            fmt: ``"json"`` or ``"csv"``.
+
+        Returns:
+            The absolute path written.
+        """
+        return export_drift_report_to_file(report, path, fmt=fmt)
+
     # -----------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------
@@ -432,3 +470,127 @@ def format_drift_report(report: DriftReport) -> str:
     lines.append(f"Fleet Status: {report.fleet_status}")
     lines.append("=" * 55)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Export helpers
+# ---------------------------------------------------------------------------
+
+_VALID_FORMATS = ("json", "csv")
+
+_CSV_COLUMNS = [
+    "window_days",
+    "threshold",
+    "generated_at",
+    "fleet_status",
+    "agent_id",
+    "constitution_id",
+    "agent_status",
+    "total_receipts",
+    "projected_breach_days",
+    "check_id",
+    "total_evaluated",
+    "pass_count",
+    "fail_count",
+    "fail_rate",
+    "trend_slope",
+    "check_projected_breach_days",
+    "check_status",
+]
+
+
+def export_drift_report(report: DriftReport, *, fmt: str = "json") -> str:
+    """Serialise a :class:`DriftReport` as JSON or CSV.
+
+    Args:
+        report: The report to serialise.
+        fmt: ``"json"`` or ``"csv"``.
+
+    Returns:
+        A string in the requested format.
+
+    Raises:
+        ValueError: If *fmt* is not ``"json"`` or ``"csv"``.
+    """
+    fmt = fmt.lower().strip()
+    if fmt not in _VALID_FORMATS:
+        raise ValueError(f"Unsupported format: {fmt!r} (expected 'json' or 'csv')")
+
+    if fmt == "json":
+        return json.dumps(asdict(report), indent=2)
+
+    return _report_to_csv(report)
+
+
+def export_drift_report_to_file(
+    report: DriftReport,
+    path: str,
+    *,
+    fmt: str = "json",
+) -> str:
+    """Write a drift report to *path* in the given format.
+
+    Returns the absolute path written.
+    """
+    content = export_drift_report(report, fmt=fmt)
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return str(p.resolve())
+
+
+def _report_to_csv(report: DriftReport) -> str:
+    """Flatten a DriftReport into one CSV row per check per agent."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_CSV_COLUMNS)
+
+    if not report.agents:
+        # Write a single summary row with no agent detail
+        writer.writerow([
+            report.window_days,
+            report.threshold,
+            report.generated_at,
+            report.fleet_status,
+            "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+        ])
+    else:
+        for agent in report.agents:
+            if not agent.checks:
+                # Agent with INSUFFICIENT_DATA — one row, no check detail
+                writer.writerow([
+                    report.window_days,
+                    report.threshold,
+                    report.generated_at,
+                    report.fleet_status,
+                    agent.agent_id,
+                    agent.constitution_id,
+                    agent.status,
+                    agent.total_receipts,
+                    agent.projected_breach_days or "",
+                    "", "", "", "", "", "", "", "",
+                ])
+            else:
+                for check in agent.checks:
+                    writer.writerow([
+                        report.window_days,
+                        report.threshold,
+                        report.generated_at,
+                        report.fleet_status,
+                        agent.agent_id,
+                        agent.constitution_id,
+                        agent.status,
+                        agent.total_receipts,
+                        agent.projected_breach_days or "",
+                        check.check_id,
+                        check.total_evaluated,
+                        check.pass_count,
+                        check.fail_count,
+                        check.fail_rate,
+                        check.trend_slope,
+                        check.projected_breach_days or "",
+                        check.status,
+                    ])
+
+    return buf.getvalue()
