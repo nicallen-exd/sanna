@@ -1,0 +1,130 @@
+# =============================================================================
+# Sanna Gateway — Reference Configuration
+# =============================================================================
+#
+# This config file tells sanna-gateway how to connect to downstream MCP
+# servers and which constitution to enforce.
+#
+# Usage:
+#   sanna-gateway --config gateway.yaml
+#
+# Claude Desktop integration:
+#   {
+#     "mcpServers": {
+#       "sanna-gateway": {
+#         "command": "sanna-gateway",
+#         "args": ["--config", "/path/to/gateway.yaml"]
+#       }
+#     }
+#   }
+
+# --- Gateway Settings ---
+gateway:
+  transport: stdio
+
+  # Constitution to enforce on all tool calls.
+  # Must be signed: sanna-sign-constitution <file> --private-key <key>.key
+  constitution: ../constitutions/openclaw-personal.yaml
+
+  # Ed25519 signing key for gateway receipts.
+  # Generate: sanna-keygen --label gateway
+  signing_key: ~/.sanna/keys/gateway.key
+
+  # Directory for receipt JSON files (one per tool call).
+  # Created automatically if it doesn't exist.
+  receipt_store: ./receipts/
+
+  # How long a must_escalate approval remains valid (seconds).
+  escalation_timeout: 300
+
+# --- Downstream MCP Servers ---
+# Each entry spawns a child process and connects via MCP stdio.
+downstream:
+  - name: notion
+    command: npx
+    args: ["-y", "@notionhq/notion-mcp-server"]
+    env:
+      # The Notion MCP server reads OPENAPI_MCP_HEADERS (JSON-encoded HTTP headers).
+      # Set this in your shell:
+      #   export OPENAPI_MCP_HEADERS='{"Authorization":"Bearer ntn_YOUR_TOKEN","Notion-Version":"2022-06-28"}'
+      OPENAPI_MCP_HEADERS: "${OPENAPI_MCP_HEADERS}"
+
+    # Per-server timeout for tool calls (seconds).
+    timeout: 30
+
+    # Default policy for tools not listed below.
+    # Options: can_execute, must_escalate, cannot_execute
+    default_policy: can_execute
+
+    # Per-tool policy overrides (most specific wins).
+    # Tool names match the Notion MCP server's actual API-* convention.
+    tools:
+      # --- Reads (can_execute) ---
+      "API-get-self":
+        policy: can_execute
+        reason: "Read own bot user"
+      "API-get-user":
+        policy: can_execute
+        reason: "Read user info"
+      "API-get-users":
+        policy: can_execute
+        reason: "List users"
+      "API-get-block-children":
+        policy: can_execute
+        reason: "Read block children"
+      "API-retrieve-a-block":
+        policy: can_execute
+        reason: "Read a block"
+      "API-retrieve-a-page":
+        policy: can_execute
+        reason: "Read a page"
+      "API-retrieve-a-page-property":
+        policy: can_execute
+        reason: "Read a page property"
+      "API-retrieve-a-comment":
+        policy: can_execute
+        reason: "Read comments"
+      "API-retrieve-a-database":
+        policy: can_execute
+        reason: "Read database schema"
+      "API-retrieve-a-data-source":
+        policy: can_execute
+        reason: "Read a data source"
+      "API-post-search":
+        policy: can_execute
+        reason: "Search pages by title"
+      "API-query-data-source":
+        policy: can_execute
+        reason: "Query a data source"
+      "API-list-data-source-templates":
+        policy: can_execute
+        reason: "List data source templates"
+
+      # --- Mutations (must_escalate) ---
+      "API-patch-page":
+        policy: must_escalate
+        reason: "Page property mutations require approval"
+      "API-post-page":
+        policy: must_escalate
+        reason: "Page creation requires approval"
+      "API-patch-block-children":
+        policy: must_escalate
+        reason: "Appending block children requires approval"
+      "API-update-a-block":
+        policy: must_escalate
+        reason: "Block updates require approval"
+      "API-delete-a-block":
+        policy: must_escalate
+        reason: "Block deletion requires approval"
+      "API-create-a-comment":
+        policy: must_escalate
+        reason: "Comment creation requires approval"
+      "API-move-page":
+        policy: must_escalate
+        reason: "Moving pages requires approval"
+      "API-create-a-data-source":
+        policy: must_escalate
+        reason: "Data source creation requires approval"
+      "API-update-a-data-source":
+        policy: must_escalate
+        reason: "Data source updates require approval"

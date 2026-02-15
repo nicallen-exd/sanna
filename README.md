@@ -244,7 +244,7 @@ sanna-create-bundle \
 sanna-verify-bundle evidence.zip
 ```
 
-Six-step verification: bundle structure, receipt schema, receipt fingerprint, constitution signature, provenance chain, receipt signature.
+Seven-step verification: bundle structure, receipt schema, receipt fingerprint, constitution signature, provenance chain, receipt signature, approval verification.
 
 Module: `sanna.bundle`
 
@@ -355,15 +355,18 @@ Deterministic test vectors in `tests/vectors/` for third-party verifier implemen
 | `sanna-hash-constitution` | Compute policy hash without Ed25519 signing |
 | `sanna-verify-constitution` | Verify a constitution's Ed25519 signature |
 | `sanna-verify` | Verify receipt integrity, signature, and provenance chain |
-| `sanna-verify-bundle` | Verify an evidence bundle (6-step check) |
+| `sanna-verify-bundle` | Verify an evidence bundle (7-step check) |
 | `sanna-create-bundle` | Create an evidence bundle zip |
 | `sanna-generate` | Generate a receipt from a Langfuse trace |
 | `sanna-drift-report` | Fleet governance drift report (`--window`, `--export`, `--output`) |
+| `sanna-approve-constitution` | Approve a signed constitution with Ed25519 |
+| `sanna-diff` | Diff two constitutions (text/JSON/markdown) |
 | `sanna-mcp` | Start MCP server (stdio transport) |
+| `sanna-gateway` | Start MCP enforcement proxy (stdio transport) |
 
 ## MCP Server
 
-Sanna exposes 5 tools over [MCP](https://modelcontextprotocol.io/) stdio transport for Claude Desktop, Cursor, and other MCP clients.
+Sanna exposes 7 tools over [MCP](https://modelcontextprotocol.io/) stdio transport for Claude Desktop, Cursor, and other MCP clients.
 
 ```bash
 pip install sanna[mcp]
@@ -391,6 +394,107 @@ Add to your MCP client config (e.g., `~/.config/claude/config.json`):
 | `sanna_list_checks` | — | List C1-C5 checks with descriptions |
 | `sanna_evaluate_action` | `action_name`, `action_params`, `constitution_path` | Evaluate action against authority boundaries |
 | `sanna_query_receipts` | `db_path?`, `agent_id?`, `status?`, `since?`, `until?`, `halt_only?`, `limit?`, `analysis?` | Query stored receipts or run drift analysis |
+| `check_constitution_approval` | `constitution_path`, `author_public_key_path?`, `approver_public_key_path?` | Check approval status with optional key verification |
+| `sanna_verify_identity_claims` | `constitution_path`, `provider_keys?` | Verify identity claims against provider public keys |
+
+## MCP Enforcement Gateway
+
+The gateway sits between any MCP client (Claude Desktop, Claude Code) and downstream MCP servers. Every tool call is evaluated against a constitution before forwarding. Every call — allowed, denied, or escalated — generates a receipt.
+
+```
+MCP Client (Claude Desktop / Claude Code)
+        ↓ (MCP stdio)
+sanna-gateway
+        ↓ evaluate against constitution
+        ↓ generate receipt
+        ↓ (MCP stdio, child processes)
+Downstream MCP Servers (Notion, GitHub, filesystem, etc.)
+```
+
+### Gateway Quickstart
+
+```bash
+pip install sanna[mcp]
+
+# Generate a signing key for the gateway
+sanna-keygen --signed-by "you@company.com" --label gateway
+
+# Create a gateway config (see below) and start
+sanna-gateway --config gateway.yaml
+```
+
+### Claude Desktop Integration
+
+Add the gateway to your Claude Desktop config (`~/.config/claude/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "governed-notion": {
+      "command": "sanna-gateway",
+      "args": ["--config", "/path/to/gateway.yaml"]
+    }
+  }
+}
+```
+
+The gateway discovers all tools from downstream servers and exposes them with a namespace prefix (e.g., `notion_search`, `notion_update_page`). Claude sees governed tools — the gateway enforces policy transparently.
+
+### Gateway Configuration
+
+```yaml
+gateway:
+  transport: stdio
+  constitution: ./constitutions/openclaw-personal.yaml
+  receipt_store: ./receipts/
+
+downstream:
+  - name: notion
+    command: npx
+    args: ["-y", "@notionhq/notion-mcp-server"]
+    env:
+      NOTION_API_KEY: "${NOTION_API_KEY}"
+    timeout: 30
+```
+
+### Policy Reference
+
+Constitution authority boundaries control gateway behavior:
+
+| Boundary | Gateway Behavior |
+|----------|-----------------|
+| `can_execute` | Tool call forwarded to downstream server |
+| `must_escalate` | Client prompted for approval before forwarding |
+| `cannot_execute` | Tool call denied, error returned to client |
+
+Priority: `cannot_execute` > `must_escalate` > `can_execute` > default (allow).
+
+Actions not matching any boundary are allowed by default. The matching algorithm uses bidirectional substring matching with separator normalization (`_`, `-`, `.` treated as spaces).
+
+### Constitution Templates
+
+Five pre-built constitutions in `examples/constitutions/`:
+
+| Template | Use Case | Autonomous | Escalated | Halted |
+|----------|----------|-----------|-----------|--------|
+| `openclaw-personal` | Individual agents on personal machines | File reads/writes, search, summarize | Email, delete, calendar, database | Financial, credentials, exfiltration, destructive |
+| `openclaw-developer` | Skill builders for marketplace | File reads/writes within scope | File deletion, database writes | Everything else (email, financial, system config) |
+| `cowork-personal` | Knowledge workers with Claude Desktop | File reads/writes, search, draft | Email, delete, calendar, database, financial | Credentials, PII, exfiltration, destructive |
+| `cowork-team` | Small teams sharing MCP infrastructure | File reads/writes, search | Email, delete, shared drives, team channels, financial | Team config, access controls, credentials, destructive |
+| `claude-code-standard` | Developers with Claude Code + MCP | File reads/writes, git commit, tests | Push to main, email, delete, package publish, staging DB | Production deploy, credentials, force push, destructive |
+
+### Constitution Approval
+
+Constitutions can be cryptographically approved after signing:
+
+```bash
+sanna-approve-constitution constitution.yaml \
+  --approver-id "lead@company.com" \
+  --approver-role "tech-lead" \
+  --private-key <approver-key-id>.key
+```
+
+Approval adds a signed `ApprovalRecord` with content hash binding. Receipts always carry approval status. Approval is mutable metadata — it can be added or revoked after the constitution is signed, and is verified separately from the constitution signature.
 
 ## Extension Points
 
@@ -442,7 +546,7 @@ pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
 
-990 tests. 0 failures.
+1488 tests. 0 failures.
 
 ## License
 

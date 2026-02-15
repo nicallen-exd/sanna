@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.10.0] - 2026-02-14
+### Added
+- **MCP enforcement gateway** (`sanna-gateway`) — proxy sits between MCP clients (Claude Desktop, Claude Code) and downstream MCP servers, enforcing constitution-based policy on every tool call
+  - Spawns and manages downstream MCP server child processes via stdio
+  - Discovers downstream tools and exposes them with `{server}_{tool}` namespace prefix
+  - Policy cascade: per-tool override > server `default_policy` > constitution authority boundaries
+  - Generates a cryptographic receipt for every tool call regardless of outcome
+  - Three enforcement outcomes: `can_execute` (forward), `cannot_execute` (deny), `must_escalate` (escalation prompt)
+  - `must_escalate` returns structured tool results prompting the MCP client for user approval
+  - Approval/denial round-trip via `sanna_escalation_respond` meta-tool
+  - Gateway signs its own receipts with a dedicated Ed25519 key (`sanna-keygen --label gateway`)
+- **Gateway YAML config format** — `gateway:` section (transport, constitution, signing_key, receipt_store, escalation_timeout) + `downstream:` list (name, command, args, env with `${VAR}` interpolation, timeout, default_policy, per-tool overrides)
+- **`sanna-gateway` CLI** and `python -m sanna.gateway` entry point
+- **Gateway reference config** (`examples/gateway/gateway.yaml`) — Notion MCP server with 22 tools mapped: 13 reads (`can_execute`), 9 mutations (`must_escalate`)
+- **Gateway demo** (`examples/gateway_demo.py`) — three-beat end-to-end demo: search (can_execute), update (must_escalate → approve), offline receipt verification
+- **5 gateway test suites** — server shell, enforcement layer, escalation flow, config loading, hardening (timeout, reconnection, error handling)
+
+### Changed
+- **Tool namespace separator** — gateway uses `_` instead of `/` to comply with Claude Desktop's tool name pattern (`^[a-zA-Z0-9_-]{1,64}$`)
+- **README** — added MCP Enforcement Gateway section with quickstart, Claude Desktop integration, gateway config reference, policy cascade, and constitution approval workflow
+- **pyproject.toml** — added `sanna-gateway` entry point
+
+### Fixed
+- **Authority decision timestamps** — `authority_decisions` records in gateway receipts now include required `timestamp` field per receipt schema
+- **Policy cascade false positives** — tools without per-tool overrides no longer fall through to constitution keyword matching; `default_policy` from config serves as intermediate fallback
+- 1488 tests (10 xfailed), 0 failures
+
+## [0.9.1] - 2026-02-14
+### Added
+- **`sanna-keygen --label`** — optional human-readable label stored in `.meta.json` sidecar. Key filenames use `key_id` (SHA-256 fingerprint) instead of hardcoded `sanna_ed25519`.
+- **Identity Verification KYA Bridge** — `IdentityClaim`, `verify_identity_claims()`, `sanna_verify_identity_claims` MCP tool (7th tool), `identity_verification` section in receipts
+- 7 post-review hardening fixes including Z-suffix timestamp parsing, strict base64 decoding, atomic sidecar writes
+- 1214 tests (10 xfailed), 0 failures
+
+## [0.9.0] - 2026-02-14
+### Added
+- **Constitution approval workflow** — `approve_constitution()` with Ed25519-signed approval records, `ApprovalRecord` and `ApprovalChain` data models
+- **Constitution structural diffing** — `diff_constitutions()` → `DiffResult` with text/JSON/markdown output
+- **`sanna-diff` and `sanna-approve-constitution`** CLI commands
+- **`check_constitution_approval`** MCP tool (6th tool) with key-based signature verification
+- **Evidence bundle 7-step verification** with independent key resolution by `key_id`
+- 10 post-review hardening fixes
+- 1163 tests (10 xfailed), 0 failures
+
 ## [0.8.2] - 2026-02-14
 ### Changed
 - **LLM evaluator IDs renamed** — LLM semantic invariants now use distinct `INV_LLM_*` IDs (`INV_LLM_CONTEXT_GROUNDING`, `INV_LLM_FABRICATION_DETECTION`, `INV_LLM_INSTRUCTION_ADHERENCE`, `INV_LLM_FALSE_CERTAINTY`, `INV_LLM_PREMATURE_COMPRESSION`). These are separate semantic invariants, not replacements for built-in C1-C5 checks. Aliases are `LLM_C1` through `LLM_C5`.
