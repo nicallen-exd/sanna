@@ -22,7 +22,10 @@ from .receipt import (
     CHECKS_VERSION,
 )
 from .verify import verify_receipt, load_schema, VerificationResult, verify_constitution_chain
-from .middleware import sanna_observe, SannaResult, SannaHaltError
+from .middleware import (
+    sanna_observe, SannaResult, SannaHaltError,
+    build_trace_data, generate_constitution_receipt,
+)
 from .constitution import (
     Constitution,
     ConstitutionSignature,
@@ -131,6 +134,8 @@ __all__ = [
     "sanna_observe",
     "SannaResult",
     "SannaHaltError",
+    "build_trace_data",
+    "generate_constitution_receipt",
     "Constitution",
     "ConstitutionSignature",
     "Boundary",

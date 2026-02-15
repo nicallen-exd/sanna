@@ -262,8 +262,14 @@ def _error_result(message: str) -> CallToolResult:
 
 
 async def _safe_close_stack(stack: AsyncExitStack) -> None:
-    """Close an ``AsyncExitStack``, suppressing cleanup errors."""
+    """Close an ``AsyncExitStack``, suppressing cleanup errors.
+
+    Catches ``BaseException`` (not just ``Exception``) because
+    ``asyncio.CancelledError`` inherits from ``BaseException`` in
+    Python 3.9+ and can be raised during process cleanup when
+    closing multiple MCP client connections sequentially.
+    """
     try:
         await stack.aclose()
-    except Exception:
+    except BaseException:
         logger.debug("Error during stack cleanup", exc_info=True)

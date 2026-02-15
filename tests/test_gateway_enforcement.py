@@ -1225,3 +1225,506 @@ class TestEdgeCases:
                 await gw.shutdown()
 
         asyncio.run(_test())
+
+
+# =============================================================================
+# 11. POLICY CASCADE — DEFAULT_POLICY + CONSTITUTION FALLTHROUGH
+# =============================================================================
+
+class TestPolicyCascadeFallthrough:
+    """Regression tests for the policy cascade bug (v0.10.1).
+
+    The bug: _resolve_policy() returned self._default_policy ("can_execute")
+    when there was no per-tool override. This was treated as an explicit
+    allow, so constitution evaluation never fired on the default path.
+
+    The fix: _resolve_policy() returns None when effective policy is
+    can_execute (no per-tool override AND default_policy is can_execute
+    or None), allowing fallthrough to constitution evaluation.
+    """
+
+    def test_default_can_execute_constitution_blocks(
+        self, mock_server_path, signed_constitution,
+    ):
+        """default_policy=can_execute + constitution cannot_execute → BLOCKED.
+
+        This is the core bug: before the fix, delete_item was allowed
+        because default_policy="can_execute" short-circuited constitution
+        evaluation.
+        """
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                default_policy="can_execute",
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_delete_item", {"item_id": "123"},
+                )
+                assert result.isError is True
+                assert "denied" in result.content[0].text.lower()
+                receipt = gw.last_receipt
+                ad = receipt["authority_decisions"]
+                assert ad[0]["decision"] == "halt"
+                assert ad[0]["boundary_type"] == "cannot_execute"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_default_can_execute_constitution_escalates(
+        self, mock_server_path, signed_constitution,
+    ):
+        """default_policy=can_execute + constitution must_escalate → ESCALATION.
+
+        update_item matches the "update" escalation condition in the
+        constitution. With default_policy=can_execute, the cascade must
+        fall through to constitution evaluation.
+        """
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                default_policy="can_execute",
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["status"] == "ESCALATION_REQUIRED"
+                receipt = gw.last_receipt
+                ad = receipt["authority_decisions"]
+                assert ad[0]["decision"] == "escalate"
+                assert ad[0]["boundary_type"] == "must_escalate"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_default_can_execute_constitution_no_opinion(
+        self, mock_server_path, signed_constitution,
+    ):
+        """default_policy=can_execute + constitution has no opinion → ALLOWED.
+
+        create_item is not in any authority boundary list. Constitution
+        fallthrough defaults to allow (uncategorized).
+        """
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                default_policy="can_execute",
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call("mock_create_item", {
+                    "name": "widget",
+                    "tags": ["a"],
+                    "metadata": {"k": 1},
+                })
+                assert result.isError is not True
+                receipt = gw.last_receipt
+                ad = receipt["authority_decisions"]
+                assert ad[0]["decision"] == "allow"
+                assert ad[0]["boundary_type"] == "uncategorized"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_default_must_escalate_fires_without_constitution(
+        self, mock_server_path, signed_constitution,
+    ):
+        """default_policy=must_escalate + no per-tool override → ESCALATION.
+
+        Restrictive default_policy takes effect without falling through
+        to constitution evaluation.
+        """
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                default_policy="must_escalate",
+            )
+            await gw.start()
+            try:
+                # get_status is can_execute in the constitution, but
+                # default_policy=must_escalate overrides at server level
+                result = await gw._forward_call("mock_get_status", {})
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["status"] == "ESCALATION_REQUIRED"
+                receipt = gw.last_receipt
+                ad = receipt["authority_decisions"]
+                assert ad[0]["decision"] == "escalate"
+                assert "Policy override" in ad[0]["reason"]
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_per_tool_can_execute_overrides_constitution(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Explicit per-tool can_execute → ALLOWED regardless of constitution.
+
+        delete_item is cannot_execute in the constitution, but an explicit
+        per-tool override to can_execute is intentional and wins.
+        """
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                default_policy="can_execute",
+                policy_overrides={"delete_item": "can_execute"},
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_delete_item", {"item_id": "123"},
+                )
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["deleted"] is True
+                receipt = gw.last_receipt
+                ad = receipt["authority_decisions"]
+                assert ad[0]["decision"] == "allow"
+                assert "Policy override" in ad[0]["reason"]
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_per_tool_cannot_execute_overrides_default(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Explicit per-tool cannot_execute → BLOCKED regardless of default_policy.
+
+        get_status is can_execute in the constitution and default_policy
+        is can_execute, but the per-tool override blocks it.
+        """
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                default_policy="can_execute",
+                policy_overrides={"get_status": "cannot_execute"},
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call("mock_get_status", {})
+                assert result.isError is True
+                receipt = gw.last_receipt
+                ad = receipt["authority_decisions"]
+                assert ad[0]["decision"] == "halt"
+                assert ad[0]["boundary_type"] == "cannot_execute"
+                assert "Policy override" in ad[0]["reason"]
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# RECEIPT FIDELITY TESTS (v0.10.1)
+# =============================================================================
+
+
+class TestReceiptFidelity:
+    """Tests for receipt fidelity: argument/output hashes, error marking."""
+
+    def test_receipt_has_arguments_hash(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Receipt gateway extensions include arguments_hash."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_get_status", {},
+                )
+                r = gw.last_receipt
+                gw_ext = r["extensions"]["gateway"]
+                assert "arguments_hash" in gw_ext
+                assert len(gw_ext["arguments_hash"]) == 16  # truncated SHA-256
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_receipt_has_tool_output_hash(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Receipt gateway extensions include tool_output_hash."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_get_status", {},
+                )
+                r = gw.last_receipt
+                gw_ext = r["extensions"]["gateway"]
+                assert "tool_output_hash" in gw_ext
+                assert len(gw_ext["tool_output_hash"]) == 16
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_downstream_is_error_false_on_success(
+        self, mock_server_path, signed_constitution,
+    ):
+        """downstream_is_error is False when downstream succeeds."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_get_status", {},
+                )
+                r = gw.last_receipt
+                gw_ext = r["extensions"]["gateway"]
+                assert gw_ext["downstream_is_error"] is False
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_arguments_hash_differs_for_different_args(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Different arguments produce different hashes."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_search", {"query": "alpha"},
+                )
+                hash_1 = gw.last_receipt["extensions"]["gateway"][
+                    "arguments_hash"
+                ]
+
+                await gw._forward_call(
+                    "mock_search", {"query": "beta"},
+                )
+                hash_2 = gw.last_receipt["extensions"]["gateway"][
+                    "arguments_hash"
+                ]
+
+                assert hash_1 != hash_2
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_arguments_hash_deterministic(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Same arguments produce same hash (canonical JSON)."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_search", {"query": "same", "limit": 5},
+                )
+                hash_1 = gw.last_receipt["extensions"]["gateway"][
+                    "arguments_hash"
+                ]
+
+                await gw._forward_call(
+                    "mock_search", {"query": "same", "limit": 5},
+                )
+                hash_2 = gw.last_receipt["extensions"]["gateway"][
+                    "arguments_hash"
+                ]
+
+                assert hash_1 == hash_2
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_halt_receipt_has_fidelity_fields(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Halted (cannot_execute) receipts also include fidelity hashes."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                policy_overrides={"get_status": "cannot_execute"},
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_get_status", {},
+                )
+                assert result.isError is True
+                r = gw.last_receipt
+                gw_ext = r["extensions"]["gateway"]
+                assert "arguments_hash" in gw_ext
+                assert "tool_output_hash" in gw_ext
+                # downstream_is_error is False for halt (never reached downstream)
+                assert gw_ext["downstream_is_error"] is False
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_receipt_fingerprint_still_verifies(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Receipt with fidelity fields passes fingerprint verification."""
+        from sanna.verify import verify_fingerprint
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_get_status", {},
+                )
+                r = gw.last_receipt
+                matches, _, _ = verify_fingerprint(r)
+                assert matches
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# PUBLIC API PROMOTION TESTS (v0.10.1)
+# =============================================================================
+
+
+class TestPublicAPIPromotion:
+    """Tests that promoted middleware functions are accessible."""
+
+    def test_build_trace_data_importable_from_sanna(self):
+        """build_trace_data is importable from sanna top-level."""
+        from sanna import build_trace_data
+        td = build_trace_data(
+            trace_id="test-123",
+            query="what is X?",
+            context="X is Y.",
+            output="X is Y.",
+        )
+        assert td["trace_id"] == "test-123"
+        assert td["input"]["query"] == "what is X?"
+        assert td["output"]["final_answer"] == "X is Y."
+
+    def test_generate_constitution_receipt_importable_from_sanna(self):
+        """generate_constitution_receipt is importable from sanna."""
+        from sanna import generate_constitution_receipt, build_trace_data
+        td = build_trace_data(
+            trace_id="test-456",
+            query="q",
+            context="c",
+            output="o",
+        )
+        receipt = generate_constitution_receipt(
+            td,
+            check_configs=[],
+            custom_records=[],
+            constitution_ref=None,
+            constitution_version="1.0.0",
+        )
+        assert receipt["trace_id"] == "test-456"
+        assert "receipt_id" in receipt
+
+    def test_build_trace_data_importable_from_middleware(self):
+        """build_trace_data is importable from sanna.middleware."""
+        from sanna.middleware import build_trace_data
+        assert callable(build_trace_data)
+
+    def test_generate_constitution_receipt_importable_from_middleware(self):
+        """generate_constitution_receipt is importable from middleware."""
+        from sanna.middleware import generate_constitution_receipt
+        assert callable(generate_constitution_receipt)

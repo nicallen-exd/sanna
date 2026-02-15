@@ -15,13 +15,20 @@ generates a signed reasoning receipt.
 Block E adds must_escalate UX: escalated tool calls are held pending
 until explicitly approved or denied via gateway meta-tools
 (``sanna_approve_escalation`` / ``sanna_deny_escalation``).
+
+Supports multiple downstream servers. Each downstream gets its own
+namespace prefix, policy overrides, and independent circuit breaker.
 """
 
 from __future__ import annotations
 
+import enum
+import hashlib
+import hmac
 import json
 import logging
 import os
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,6 +58,76 @@ _DEFAULT_ESCALATION_TIMEOUT = 300  # 5 minutes
 # marking the downstream as unhealthy
 _CIRCUIT_BREAKER_THRESHOLD = 3
 
+# Default circuit breaker cooldown (seconds) — time in OPEN state
+# before transitioning to HALF_OPEN for a probe call
+_DEFAULT_CIRCUIT_BREAKER_COOLDOWN = 60.0
+
+
+# ---------------------------------------------------------------------------
+# Utility: safe text extraction from MCP tool results
+# ---------------------------------------------------------------------------
+
+def _extract_result_text(tool_result: types.CallToolResult | None) -> str:
+    """Safely extract text from an MCP tool result for hashing and receipts.
+
+    Handles empty content, non-text content types (images, resources),
+    and None results without crashing.
+    """
+    if tool_result is None or not tool_result.content:
+        return ""
+    parts: list[str] = []
+    for item in tool_result.content:
+        if hasattr(item, "text") and item.text is not None:
+            parts.append(item.text)
+        elif hasattr(item, "type"):
+            parts.append(f"[{item.type} content]")
+        else:
+            parts.append("[unknown content]")
+    return "\n".join(parts)
+
+
+class CircuitState(enum.Enum):
+    """Circuit breaker states for downstream health tracking."""
+    CLOSED = "closed"      # healthy — all calls forwarded normally
+    OPEN = "open"          # unhealthy — calls blocked immediately
+    HALF_OPEN = "half_open"  # probing — one call forwarded as probe
+
+
+# ---------------------------------------------------------------------------
+# Multi-downstream data models
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DownstreamSpec:
+    """Per-downstream configuration for the gateway constructor.
+
+    Bundles connection parameters and per-server policy configuration.
+    Used by the multi-downstream constructor path and by ``run_gateway()``.
+    """
+    name: str
+    command: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] | None = None
+    timeout: float = 30.0
+    policy_overrides: dict[str, str] = field(default_factory=dict)
+    default_policy: str | None = None
+    circuit_breaker_cooldown: float = _DEFAULT_CIRCUIT_BREAKER_COOLDOWN
+
+
+@dataclass
+class _DownstreamState:
+    """Runtime state for a single downstream connection.
+
+    Holds the connection, circuit breaker state, and per-downstream
+    tool map. One instance per downstream server.
+    """
+    spec: DownstreamSpec
+    connection: DownstreamConnection | None = None
+    tool_map: dict[str, str] = field(default_factory=dict)
+    circuit_state: CircuitState = CircuitState.CLOSED
+    circuit_opened_at: datetime | None = None
+    consecutive_failures: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Pending escalation store
@@ -67,6 +144,11 @@ class PendingEscalation:
     reason: str
     created_at: str  # ISO 8601
     escalation_receipt_id: str = ""
+    token_hash: str = ""  # SHA-256 of the HMAC approval token
+    status: str = "pending"  # pending | approved | failed
+
+
+_DEFAULT_MAX_PENDING_ESCALATIONS = 100
 
 
 class EscalationStore:
@@ -75,13 +157,32 @@ class EscalationStore:
     Not persistent — pending escalations are lost on gateway restart.
     """
 
-    def __init__(self, timeout: float = _DEFAULT_ESCALATION_TIMEOUT) -> None:
+    def __init__(
+        self,
+        timeout: float = _DEFAULT_ESCALATION_TIMEOUT,
+        max_pending: int = _DEFAULT_MAX_PENDING_ESCALATIONS,
+    ) -> None:
         self._pending: dict[str, PendingEscalation] = {}
         self._timeout = timeout
+        self._max_pending = max_pending
 
     @property
     def timeout(self) -> float:
         return self._timeout
+
+    @property
+    def max_pending(self) -> int:
+        return self._max_pending
+
+    def purge_expired(self) -> int:
+        """Remove all expired entries. Returns count purged."""
+        expired_ids = [
+            eid for eid, entry in self._pending.items()
+            if self.is_expired(entry)
+        ]
+        for eid in expired_ids:
+            del self._pending[eid]
+        return len(expired_ids)
 
     def create(
         self,
@@ -91,8 +192,23 @@ class EscalationStore:
         server_name: str,
         reason: str,
     ) -> PendingEscalation:
-        """Create and store a new pending escalation."""
-        esc_id = f"esc_{uuid.uuid4().hex[:8]}"
+        """Create and store a new pending escalation.
+
+        Purges expired entries first. Raises ``RuntimeError`` if the
+        store is at capacity after purging.
+        """
+        # Housekeeping: purge expired entries on every create
+        self.purge_expired()
+
+        # Enforce capacity limit
+        if len(self._pending) >= self._max_pending:
+            raise RuntimeError(
+                f"Escalation store at capacity "
+                f"({self._max_pending} pending). "
+                f"Approve or deny existing escalations first."
+            )
+
+        esc_id = f"esc_{uuid.uuid4().hex}"
         entry = PendingEscalation(
             escalation_id=esc_id,
             prefixed_name=prefixed_name,
@@ -123,6 +239,15 @@ class EscalationStore:
         """Remove and return a pending escalation."""
         return self._pending.pop(escalation_id, None)
 
+    def mark_status(
+        self, escalation_id: str, status: str,
+    ) -> PendingEscalation | None:
+        """Update the status of a pending escalation in-place."""
+        entry = self._pending.get(escalation_id)
+        if entry is not None:
+            entry.status = status
+        return entry
+
     def __len__(self) -> int:
         return len(self._pending)
 
@@ -135,7 +260,7 @@ class EscalationStore:
 # ---------------------------------------------------------------------------
 
 class SannaGateway:
-    """MCP gateway that proxies tools from a downstream stdio MCP server.
+    """MCP gateway that proxies tools from one or more downstream MCP servers.
 
     Discovers downstream tools on startup, re-exposes them under
     ``{server_name}_{tool_name}`` prefixed names, and forwards all
@@ -148,7 +273,9 @@ class SannaGateway:
     approves or denies via the ``sanna_approve_escalation`` /
     ``sanna_deny_escalation`` meta-tools.
 
-    Usage::
+    Supports two construction modes:
+
+    **Single-downstream (v0.10.0 compatible):**
 
         gw = SannaGateway(
             server_name="notion",
@@ -157,46 +284,90 @@ class SannaGateway:
             constitution_path="constitution.yaml",
             signing_key_path="gateway.key",
         )
-        await gw.start()
-        try:
-            tools = gw.tool_map
-            result = await gw._forward_call("notion_search", {"query": "hi"})
-            receipt = gw.last_receipt  # governance receipt
-        finally:
-            await gw.shutdown()
+
+    **Multi-downstream:**
+
+        gw = SannaGateway(
+            downstreams=[
+                DownstreamSpec(name="notion", command="npx", ...),
+                DownstreamSpec(name="github", command="npx", ...),
+            ],
+            constitution_path="constitution.yaml",
+            signing_key_path="gateway.key",
+        )
     """
 
     def __init__(
         self,
-        server_name: str,
-        command: str,
+        server_name: str | None = None,
+        command: str | None = None,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         timeout: float = 30.0,
+        # Multi-downstream
+        downstreams: list[DownstreamSpec] | None = None,
         # Block C: enforcement
         constitution_path: str | None = None,
         signing_key_path: str | None = None,
+        constitution_public_key_path: str | None = None,
         policy_overrides: dict[str, str] | None = None,
         default_policy: str | None = None,
         # Block E: escalation
         escalation_timeout: float = _DEFAULT_ESCALATION_TIMEOUT,
+        max_pending_escalations: int = _DEFAULT_MAX_PENDING_ESCALATIONS,
         # Block F: hardening
         receipt_store_path: str | None = None,
+        circuit_breaker_cooldown: float = _DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
+        # Approval token enforcement
+        require_approval_token: bool = True,
     ) -> None:
-        self._server_name = server_name
-        self._command = command
-        self._args = args or []
-        self._env = env
-        self._timeout = timeout
-        self._downstream: DownstreamConnection | None = None
-        self._tool_map: dict[str, str] = {}  # prefixed_name -> original_name
+        # Build downstream specs — either from explicit list or legacy params
+        if downstreams is not None:
+            if len(downstreams) == 0:
+                raise ValueError(
+                    "downstreams list must contain at least one entry"
+                )
+            self._downstream_states: dict[str, _DownstreamState] = {}
+            for spec in downstreams:
+                if spec.name in self._downstream_states:
+                    raise ValueError(
+                        f"Duplicate downstream name: {spec.name}"
+                    )
+                self._downstream_states[spec.name] = _DownstreamState(
+                    spec=spec,
+                )
+        elif server_name is not None and command is not None:
+            # Legacy single-downstream constructor
+            spec = DownstreamSpec(
+                name=server_name,
+                command=command,
+                args=args or [],
+                env=env,
+                timeout=timeout,
+                policy_overrides=policy_overrides or {},
+                default_policy=default_policy,
+                circuit_breaker_cooldown=circuit_breaker_cooldown,
+            )
+            self._downstream_states = {
+                server_name: _DownstreamState(spec=spec),
+            }
+        else:
+            raise ValueError(
+                "Either 'downstreams' list or 'server_name' + 'command' "
+                "required"
+            )
+
+        # Unified tool routing: prefixed_name → downstream_name
+        self._tool_to_downstream: dict[str, str] = {}
+        # Unified tool map: prefixed_name → original_name (backward compat)
+        self._tool_map: dict[str, str] = {}
+
         self._server = Server("sanna_gateway")
 
-        # Block C: enforcement state
+        # Block C: enforcement state (gateway-level, shared by all downstreams)
         self._constitution_path = constitution_path
         self._signing_key_path = signing_key_path
-        self._policy_overrides = policy_overrides or {}
-        self._default_policy = default_policy
+        self._constitution_public_key_path = constitution_public_key_path
         self._constitution: Any = None
         self._constitution_ref: dict | None = None
         self._check_configs: list | None = None
@@ -204,26 +375,82 @@ class SannaGateway:
         self._last_receipt: dict | None = None
 
         # Block E: escalation state
-        self._escalation_store = EscalationStore(timeout=escalation_timeout)
+        self._escalation_store = EscalationStore(
+            timeout=escalation_timeout,
+            max_pending=max_pending_escalations,
+        )
+
+        # Approval token: HMAC-bound human verification
+        self._require_approval_token = require_approval_token
+        self._gateway_secret = os.urandom(32)
 
         # Block F: hardening state
         self._receipt_store_path = receipt_store_path
-        self._consecutive_failures = 0
-        self._healthy = True
 
         self._setup_handlers()
 
-    # -- properties ----------------------------------------------------------
+    # -- backward-compat helpers for single-downstream tests -----------------
+
+    @property
+    def _first_ds(self) -> _DownstreamState:
+        """First (or only) downstream state — for backward compat."""
+        return next(iter(self._downstream_states.values()))
+
+    # These properties let existing tests that directly set/get internal
+    # circuit breaker fields continue working for single-downstream gateways.
+
+    @property
+    def _circuit_state(self) -> CircuitState:
+        return self._first_ds.circuit_state
+
+    @_circuit_state.setter
+    def _circuit_state(self, value: CircuitState) -> None:
+        self._first_ds.circuit_state = value
+
+    @property
+    def _circuit_opened_at(self) -> datetime | None:
+        return self._first_ds.circuit_opened_at
+
+    @_circuit_opened_at.setter
+    def _circuit_opened_at(self, value: datetime | None) -> None:
+        self._first_ds.circuit_opened_at = value
+
+    @property
+    def _consecutive_failures(self) -> int:
+        return self._first_ds.consecutive_failures
+
+    @_consecutive_failures.setter
+    def _consecutive_failures(self, value: int) -> None:
+        self._first_ds.consecutive_failures = value
+
+    @property
+    def _circuit_breaker_cooldown(self) -> float:
+        return self._first_ds.spec.circuit_breaker_cooldown
+
+    @property
+    def _downstream(self) -> DownstreamConnection | None:
+        return self._first_ds.connection
+
+    @_downstream.setter
+    def _downstream(self, value: DownstreamConnection | None) -> None:
+        self._first_ds.connection = value
+
+    # -- public properties ---------------------------------------------------
 
     @property
     def server_name(self) -> str:
-        """Configured name for the downstream server."""
-        return self._server_name
+        """Name of the first (or only) downstream server."""
+        return self._first_ds.spec.name
 
     @property
     def downstream(self) -> DownstreamConnection | None:
-        """The downstream connection, or ``None`` before start."""
-        return self._downstream
+        """The first downstream connection, or ``None`` before start."""
+        return self._first_ds.connection
+
+    @property
+    def downstream_states(self) -> dict[str, _DownstreamState]:
+        """Per-downstream runtime states (read-only view)."""
+        return dict(self._downstream_states)
 
     @property
     def tool_map(self) -> dict[str, str]:
@@ -247,13 +474,57 @@ class SannaGateway:
 
     @property
     def healthy(self) -> bool:
-        """Whether the downstream connection is healthy."""
-        return self._healthy
+        """Whether all downstreams are healthy (circuit CLOSED)."""
+        return all(
+            ds.circuit_state == CircuitState.CLOSED
+            for ds in self._downstream_states.values()
+        )
+
+    @property
+    def circuit_state(self) -> CircuitState:
+        """Circuit state of the first downstream."""
+        return self._first_ds.circuit_state
 
     @property
     def consecutive_failures(self) -> int:
-        """Number of consecutive connection-level failures."""
-        return self._consecutive_failures
+        """Consecutive failure count of the first downstream."""
+        return self._first_ds.consecutive_failures
+
+    @property
+    def require_approval_token(self) -> bool:
+        """Whether HMAC approval tokens are required for escalations."""
+        return self._require_approval_token
+
+    # -- approval token computation ------------------------------------------
+
+    def _compute_approval_token(self, entry: PendingEscalation) -> str:
+        """Compute the HMAC-SHA256 approval token for an escalation.
+
+        The token binds the escalation to specific parameters so it
+        cannot be replayed across different escalations.
+
+        Token = HMAC-SHA256(gateway_secret,
+            escalation_id || tool_name || args_hash || created_at)
+
+        Returns the token as a hex string.
+        """
+        args_hash = hashlib.sha256(
+            json.dumps(entry.arguments, sort_keys=True).encode(),
+        ).hexdigest()
+        message = (
+            f"{entry.escalation_id}|{entry.original_name}|"
+            f"{args_hash}|{entry.created_at}"
+        )
+        return hmac.new(
+            self._gateway_secret,
+            message.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    @staticmethod
+    def _hash_token(token: str) -> str:
+        """SHA-256 hash of a token for storage and receipts."""
+        return hashlib.sha256(token.encode()).hexdigest()
 
     # -- handler registration ------------------------------------------------
 
@@ -275,28 +546,41 @@ class SannaGateway:
     # -- lifecycle -----------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect to downstream, discover tools, load constitution.
+        """Connect to all downstreams, discover tools, load constitution.
 
         Raises:
-            DownstreamConnectionError: If the downstream server cannot be
+            DownstreamConnectionError: If a downstream server cannot be
                 started or the MCP handshake fails.
             SannaConstitutionError: If the constitution is not signed.
         """
-        self._downstream = DownstreamConnection(
-            command=self._command,
-            args=self._args,
-            env=self._env,
-            timeout=self._timeout,
-        )
-        await self._downstream.connect()
+        for ds_state in self._downstream_states.values():
+            spec = ds_state.spec
+            ds_state.connection = DownstreamConnection(
+                command=spec.command,
+                args=spec.args,
+                env=spec.env,
+                timeout=spec.timeout,
+            )
+            await ds_state.connection.connect()
 
-        for tool in self._downstream.tools:
-            prefixed = f"{self._server_name}_{tool['name']}"
-            if prefixed in self._tool_map:
-                logger.warning(
-                    "Tool name collision: %s (already registered)", prefixed,
-                )
-            self._tool_map[prefixed] = tool["name"]
+            for tool in ds_state.connection.tools:
+                prefixed = f"{spec.name}_{tool['name']}"
+                if prefixed in self._tool_to_downstream:
+                    logger.warning(
+                        "Tool name collision: %s (already registered "
+                        "by '%s')",
+                        prefixed,
+                        self._tool_to_downstream[prefixed],
+                    )
+                ds_state.tool_map[prefixed] = tool["name"]
+                self._tool_map[prefixed] = tool["name"]
+                self._tool_to_downstream[prefixed] = spec.name
+
+            logger.info(
+                "Downstream '%s' connected: %d tools",
+                spec.name,
+                len(ds_state.tool_map),
+            )
 
         # Block C: load constitution if configured
         if self._constitution_path is not None:
@@ -313,6 +597,16 @@ class SannaGateway:
                     f"Constitution is not signed: {self._constitution_path}. "
                     f"Run: sanna-sign-constitution {self._constitution_path}"
                 )
+
+            # Verify constitution Ed25519 signature if public key configured
+            if self._constitution_public_key_path:
+                self._verify_constitution_signature()
+            else:
+                logger.info(
+                    "No constitution public key configured — "
+                    "signature verification skipped",
+                )
+
             self._constitution_ref = constitution_to_receipt_ref(
                 self._constitution,
             )
@@ -328,17 +622,54 @@ class SannaGateway:
             )
 
         logger.info(
-            "Gateway started: %d tools from '%s'",
+            "Gateway started: %d tools from %d downstream(s)",
             len(self._tool_map),
-            self._server_name,
+            len(self._downstream_states),
+        )
+
+    def _verify_constitution_signature(self) -> None:
+        """Verify constitution Ed25519 signature against configured public key.
+
+        Called during startup when ``constitution_public_key_path`` is set.
+        Raises ``SannaConstitutionError`` if the signature is missing,
+        invalid, or doesn't match the public key.
+        """
+        from sanna.constitution import SannaConstitutionError
+        from sanna.crypto import verify_constitution_full
+
+        key_path = self._constitution_public_key_path
+        sig = self._constitution.provenance.signature
+
+        if sig is None or not sig.value:
+            raise SannaConstitutionError(
+                "Constitution signature verification failed: "
+                "constitution has no Ed25519 signature but "
+                f"constitution_public_key is configured ({key_path}). "
+                "Sign the constitution with: "
+                f"sanna-sign-constitution {self._constitution_path}"
+            )
+
+        valid = verify_constitution_full(self._constitution, key_path)
+        if not valid:
+            raise SannaConstitutionError(
+                "Constitution signature verification failed. "
+                "The constitution may have been tampered with. "
+                f"Public key: {key_path}"
+            )
+
+        logger.info(
+            "Constitution signature verified against %s", key_path,
         )
 
     async def shutdown(self) -> None:
-        """Disconnect from the downstream server and clean up."""
-        if self._downstream is not None:
-            await self._downstream.close()
-            self._downstream = None
+        """Disconnect from all downstream servers and clean up."""
+        for ds_state in self._downstream_states.values():
+            if ds_state.connection is not None:
+                await ds_state.connection.close()
+                ds_state.connection = None
+            ds_state.tool_map.clear()
         self._tool_map.clear()
+        self._tool_to_downstream.clear()
         self._constitution = None
         self._constitution_ref = None
         self._check_configs = None
@@ -363,132 +694,234 @@ class SannaGateway:
     def _build_tool_list(self) -> list[types.Tool]:
         """Build the gateway's tool list from discovered downstream tools
         plus gateway meta-tools."""
-        if self._downstream is None:
-            return []
         tools: list[types.Tool] = []
-        for tool_dict in self._downstream.tools:
-            prefixed = f"{self._server_name}_{tool_dict['name']}"
-            tools.append(_dict_to_tool(prefixed, tool_dict))
+        for ds_state in self._downstream_states.values():
+            if ds_state.connection is None:
+                continue
+            for tool_dict in ds_state.connection.tools:
+                prefixed = f"{ds_state.spec.name}_{tool_dict['name']}"
+                tools.append(_dict_to_tool(prefixed, tool_dict))
 
         # Block E: add gateway meta-tools (not prefixed)
         tools.extend(_build_meta_tools())
         return tools
 
+    # -- downstream lookup ---------------------------------------------------
+
+    def _get_ds_for_tool(
+        self, prefixed_name: str,
+    ) -> tuple[_DownstreamState, str] | None:
+        """Look up the downstream and original name for a prefixed tool.
+
+        Returns ``(ds_state, original_name)`` or ``None`` if not found.
+        """
+        ds_name = self._tool_to_downstream.get(prefixed_name)
+        if ds_name is None:
+            return None
+        ds_state = self._downstream_states.get(ds_name)
+        if ds_state is None:
+            return None
+        original = ds_state.tool_map.get(prefixed_name)
+        if original is None:
+            return None
+        return ds_state, original
+
     # -- policy resolution ---------------------------------------------------
 
-    def _resolve_policy(self, original_name: str) -> str | None:
-        """Resolve per-tool policy override.
+    def _resolve_policy(
+        self, original_name: str, ds_state: _DownstreamState,
+    ) -> str | None:
+        """Resolve per-tool policy override for a specific downstream.
 
         Priority:
-            1. Per-tool override in ``_policy_overrides``
-            2. ``_default_policy`` (from config ``default_policy``)
+            1. Per-tool override in ``ds_state.spec.policy_overrides``
+            2. Restrictive ``ds_state.spec.default_policy``
             3. ``None`` — fall through to constitution evaluation
 
         Returns ``"can_execute"``, ``"cannot_execute"``, or
-        ``"must_escalate"``, or ``None`` to fall through to
-        constitution authority boundary evaluation.
+        ``"must_escalate"``, or ``None`` to fall through.
         """
-        override = self._policy_overrides.get(original_name)
+        # 1. Per-tool override — always wins (explicit intent)
+        override = ds_state.spec.policy_overrides.get(original_name)
         if override is not None:
             return override
-        return self._default_policy
+
+        # 2. Restrictive default_policy takes effect as a server-level guard
+        dp = ds_state.spec.default_policy
+        if dp is not None and dp != "can_execute":
+            return dp
+
+        # 3. No override — fall through to constitution evaluation
+        return None
 
     # -- crash recovery & circuit breaker (Block F) --------------------------
 
     async def _after_downstream_call(
         self,
         tool_result: types.CallToolResult,
+        ds_state: _DownstreamState,
+        *,
+        is_probe: bool = False,
     ) -> types.CallToolResult:
-        """Post-call hook: track failures, attempt restart on crash.
+        """Post-call hook: track per-downstream failures and recovery.
 
-        Counts consecutive connection-level errors. On the first connection
-        error, attempts ONE restart. After ``_CIRCUIT_BREAKER_THRESHOLD``
-        consecutive failures, marks the downstream as unhealthy.
+        Counts consecutive connection-level errors. On the first
+        error, attempts ONE restart. After threshold consecutive
+        failures, opens the circuit breaker for this downstream.
         """
-        if self._downstream is None:
+        if ds_state.connection is None:
             return tool_result
 
-        if not self._downstream.last_call_was_connection_error:
+        name = ds_state.spec.name
+
+        if not ds_state.connection.last_call_was_connection_error:
             # Success — reset counter
-            if self._consecutive_failures > 0:
+            if ds_state.consecutive_failures > 0:
                 logger.info(
                     "Downstream '%s' recovered after %d failure(s)",
-                    self._server_name,
-                    self._consecutive_failures,
+                    name,
+                    ds_state.consecutive_failures,
                 )
-            self._consecutive_failures = 0
+            ds_state.consecutive_failures = 0
+
+            # Probe success: HALF_OPEN → CLOSED
+            if is_probe and ds_state.circuit_state == CircuitState.HALF_OPEN:
+                ds_state.circuit_state = CircuitState.CLOSED
+                ds_state.circuit_opened_at = None
+                logger.info(
+                    "Circuit breaker recovered for %s",
+                    name,
+                )
+
             return tool_result
 
         # Connection error detected
-        self._consecutive_failures += 1
+        ds_state.consecutive_failures += 1
         logger.warning(
             "Downstream '%s' connection error (%d/%d): %s",
-            self._server_name,
-            self._consecutive_failures,
+            name,
+            ds_state.consecutive_failures,
             _CIRCUIT_BREAKER_THRESHOLD,
-            tool_result.content[0].text if tool_result.content else "unknown",
+            _extract_result_text(tool_result) or "unknown",
         )
 
-        if self._consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
-            if self._healthy:
-                self._healthy = False
+        # Probe failure: HALF_OPEN → OPEN (restart cooldown)
+        if is_probe and ds_state.circuit_state == CircuitState.HALF_OPEN:
+            ds_state.circuit_state = CircuitState.OPEN
+            ds_state.circuit_opened_at = datetime.now(timezone.utc)
+            logger.warning(
+                "Circuit breaker probe failed for %s, reopening",
+                name,
+            )
+            return tool_result
+
+        if ds_state.consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+            if ds_state.circuit_state == CircuitState.CLOSED:
+                ds_state.circuit_state = CircuitState.OPEN
+                ds_state.circuit_opened_at = datetime.now(timezone.utc)
                 logger.error(
                     "Downstream '%s' marked UNHEALTHY after %d consecutive "
                     "failures — circuit breaker open",
-                    self._server_name,
-                    self._consecutive_failures,
+                    name,
+                    ds_state.consecutive_failures,
                 )
             return tool_result
 
         # Attempt ONE restart on first/second failure
-        restarted = await self._attempt_restart()
+        restarted = await self._attempt_restart(ds_state)
         if restarted:
-            self._consecutive_failures = 0
+            ds_state.consecutive_failures = 0
             logger.info(
                 "Downstream '%s' restarted successfully, tools re-discovered",
-                self._server_name,
+                name,
             )
         return tool_result
 
-    async def _attempt_restart(self) -> bool:
-        """Try to reconnect to the downstream server.
+    async def _attempt_restart(self, ds_state: _DownstreamState) -> bool:
+        """Try to reconnect a specific downstream server.
 
         Returns ``True`` on success, ``False`` on failure.
         """
-        if self._downstream is None:
+        if ds_state.connection is None:
             return False
         try:
-            await self._downstream.reconnect()
-            self._rebuild_tool_map()
+            await ds_state.connection.reconnect()
+            self._rebuild_tool_map_for(ds_state)
             return True
         except Exception as e:
             logger.error(
-                "Downstream '%s' restart failed: %s", self._server_name, e,
+                "Downstream '%s' restart failed: %s",
+                ds_state.spec.name, e,
             )
             return False
 
     def _rebuild_tool_map(self) -> None:
-        """Rebuild tool_map from current downstream tools after restart."""
-        if self._downstream is None:
+        """Rebuild tool_map from first downstream (backward compat)."""
+        self._rebuild_tool_map_for(self._first_ds)
+
+    def _rebuild_tool_map_for(self, ds_state: _DownstreamState) -> None:
+        """Rebuild tool routing for a specific downstream after restart."""
+        if ds_state.connection is None:
             return
-        self._tool_map.clear()
-        for tool in self._downstream.tools:
-            prefixed = f"{self._server_name}_{tool['name']}"
+        name = ds_state.spec.name
+
+        # Remove old entries for this downstream
+        old_tools = list(ds_state.tool_map.keys())
+        for prefixed in old_tools:
+            self._tool_map.pop(prefixed, None)
+            self._tool_to_downstream.pop(prefixed, None)
+        ds_state.tool_map.clear()
+
+        # Re-add tools from current downstream
+        for tool in ds_state.connection.tools:
+            prefixed = f"{name}_{tool['name']}"
+            ds_state.tool_map[prefixed] = tool["name"]
             self._tool_map[prefixed] = tool["name"]
+            self._tool_to_downstream[prefixed] = name
 
     def _make_unhealthy_result(
-        self, prefixed_name: str,
+        self, prefixed_name: str, ds_state: _DownstreamState,
     ) -> types.CallToolResult:
-        """Return an error result when downstream is unhealthy."""
+        """Return an error result when a downstream is unhealthy."""
+        state_label = ds_state.circuit_state.value
         msg = (
-            f"Downstream '{self._server_name}' is unhealthy — "
-            f"circuit breaker open. Tool '{prefixed_name}' not forwarded."
+            f"Downstream '{ds_state.spec.name}' is unhealthy — "
+            f"circuit breaker {state_label}. "
+            f"Tool '{prefixed_name}' not forwarded."
         )
         logger.warning("Circuit breaker blocked: %s", prefixed_name)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=msg)],
             isError=True,
         )
+
+    async def _probe_call(
+        self,
+        prefixed_name: str,
+        original_name: str,
+        arguments: dict[str, Any],
+        ds_state: _DownstreamState,
+    ) -> types.CallToolResult:
+        """Forward a single probe call during HALF_OPEN state.
+
+        If the probe succeeds, the circuit transitions to CLOSED.
+        If it fails, the circuit transitions back to OPEN.
+        """
+        if self._constitution is None:
+            # No constitution — transparent passthrough
+            result = await ds_state.connection.call_tool(
+                original_name, arguments,
+            )
+            await self._after_downstream_call(
+                result, ds_state, is_probe=True,
+            )
+            return result
+        else:
+            # With constitution — run through enforcement
+            return await self._enforced_call(
+                prefixed_name, original_name, arguments, ds_state,
+                is_probe=True,
+            )
 
     # -- receipt persistence (Block F) ---------------------------------------
 
@@ -533,66 +966,113 @@ class SannaGateway:
         if name == _META_TOOL_DENY:
             return await self._handle_deny(arguments or {})
 
-        original = self._tool_map.get(name)
-        if original is None:
+        # Route to correct downstream
+        lookup = self._get_ds_for_tool(name)
+        if lookup is None:
             return types.CallToolResult(
                 content=[types.TextContent(
                     type="text", text=f"Unknown tool: {name}",
                 )],
                 isError=True,
             )
+        ds_state, original = lookup
 
-        if self._downstream is None:
+        if ds_state.connection is None:
             return types.CallToolResult(
                 content=[types.TextContent(
                     type="text",
-                    text="Gateway not connected to downstream server",
+                    text=(
+                        f"Gateway not connected to downstream server "
+                        f"'{ds_state.spec.name}'"
+                    ),
                 )],
                 isError=True,
             )
 
         arguments = arguments or {}
 
-        # Block F: circuit breaker — skip forwarding if unhealthy
-        if not self._healthy:
-            error_result = self._make_unhealthy_result(name)
+        # Block F: circuit breaker — per-downstream state check
+        if ds_state.circuit_state == CircuitState.OPEN:
+            # Check if cooldown has elapsed → transition to HALF_OPEN
+            if ds_state.circuit_opened_at is not None:
+                elapsed = (
+                    datetime.now(timezone.utc) - ds_state.circuit_opened_at
+                ).total_seconds()
+                if elapsed >= ds_state.spec.circuit_breaker_cooldown:
+                    # Transition to HALF_OPEN — this call becomes the probe
+                    ds_state.circuit_state = CircuitState.HALF_OPEN
+                    logger.info(
+                        "Circuit breaker cooldown elapsed for '%s' "
+                        "(%.1fs) — sending probe",
+                        ds_state.spec.name,
+                        elapsed,
+                    )
+                    return await self._probe_call(
+                        name, original, arguments, ds_state,
+                    )
+            # Cooldown not elapsed — block the call
+            error_result = self._make_unhealthy_result(name, ds_state)
             if self._constitution is not None:
-                # Generate error receipt for blocked call
                 receipt = self._generate_error_receipt(
                     prefixed_name=name,
                     original_name=original,
                     arguments=arguments,
-                    error_text=error_result.content[0].text,
+                    error_text=_extract_result_text(error_result),
+                    server_name=ds_state.spec.name,
                 )
                 self._last_receipt = receipt
                 self._persist_receipt(receipt)
             return error_result
 
+        if ds_state.circuit_state == CircuitState.HALF_OPEN:
+            # Already probing — block concurrent calls
+            error_result = self._make_unhealthy_result(name, ds_state)
+            if self._constitution is not None:
+                receipt = self._generate_error_receipt(
+                    prefixed_name=name,
+                    original_name=original,
+                    arguments=arguments,
+                    error_text=_extract_result_text(error_result),
+                    server_name=ds_state.spec.name,
+                )
+                self._last_receipt = receipt
+                self._persist_receipt(receipt)
+            return error_result
+
+        # CLOSED — forward normally
         # No constitution -> transparent passthrough (Block B behavior)
         if self._constitution is None:
-            result = await self._downstream.call_tool(original, arguments)
-            await self._after_downstream_call(result)
+            result = await ds_state.connection.call_tool(
+                original, arguments,
+            )
+            await self._after_downstream_call(result, ds_state)
             return result
 
         # -- Block C: enforcement --
-        return await self._enforced_call(name, original, arguments)
+        return await self._enforced_call(
+            name, original, arguments, ds_state,
+        )
 
     async def _enforced_call(
         self,
         prefixed_name: str,
         original_name: str,
         arguments: dict[str, Any],
+        ds_state: _DownstreamState,
+        is_probe: bool = False,
     ) -> types.CallToolResult:
         """Run enforcement pipeline: evaluate, enforce, receipt."""
         from sanna.enforcement import evaluate_authority, AuthorityDecision
         from sanna.receipt import HaltEvent
         from sanna.middleware import (
-            _generate_constitution_receipt,
-            _build_trace_data,
+            generate_constitution_receipt,
+            build_trace_data,
         )
 
-        # 1. Resolve policy
-        policy_override = self._resolve_policy(original_name)
+        server_name = ds_state.spec.name
+
+        # 1. Resolve policy for this downstream
+        policy_override = self._resolve_policy(original_name, ds_state)
         if policy_override is not None:
             if policy_override == "cannot_execute":
                 decision = AuthorityDecision(
@@ -652,20 +1132,25 @@ class SannaGateway:
             )
             # Block E: create pending escalation instead of denying
             return await self._handle_escalation(
-                prefixed_name, original_name, arguments, decision,
+                prefixed_name, original_name, arguments,
+                decision, ds_state,
             )
         else:
             logger.info("ALLOW %s", original_name)
             # Forward to downstream
-            tool_result = await self._downstream.call_tool(
+            tool_result = await ds_state.connection.call_tool(
                 original_name, arguments,
             )
             # Block F: crash recovery
-            await self._after_downstream_call(tool_result)
-            if tool_result.content:
-                result_text = tool_result.content[0].text
+            await self._after_downstream_call(
+                tool_result, ds_state, is_probe=is_probe,
+            )
+            result_text = _extract_result_text(tool_result)
 
         # 4. Generate receipt
+        downstream_is_error = (
+            tool_result is not None and tool_result.isError is True
+        )
         receipt = self._generate_receipt(
             prefixed_name=prefixed_name,
             original_name=original_name,
@@ -674,6 +1159,8 @@ class SannaGateway:
             decision=decision,
             authority_decisions=authority_decisions,
             halt_event=halt_event,
+            server_name=server_name,
+            downstream_is_error=downstream_is_error,
         )
 
         self._last_receipt = receipt
@@ -698,18 +1185,60 @@ class SannaGateway:
         original_name: str,
         arguments: dict[str, Any],
         decision: Any,
+        ds_state: _DownstreamState,
     ) -> types.CallToolResult:
         """Create a pending escalation and return structured result."""
-        # 1. Store pending escalation
-        entry = self._escalation_store.create(
-            prefixed_name=prefixed_name,
-            original_name=original_name,
-            arguments=arguments,
-            server_name=self._server_name,
-            reason=decision.reason,
-        )
+        server_name = ds_state.spec.name
 
-        # 2. Generate escalation receipt
+        # 1. Store pending escalation
+        try:
+            entry = self._escalation_store.create(
+                prefixed_name=prefixed_name,
+                original_name=original_name,
+                arguments=arguments,
+                server_name=server_name,
+                reason=decision.reason,
+            )
+        except RuntimeError as exc:
+            logger.warning("Escalation store full: %s", exc)
+            return types.CallToolResult(
+                content=[types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "ESCALATION_STORE_FULL",
+                        "detail": str(exc),
+                    }),
+                )],
+                isError=True,
+            )
+
+        # 2. Compute and emit approval token (out-of-band via stderr)
+        if self._require_approval_token:
+            token = self._compute_approval_token(entry)
+            entry.token_hash = self._hash_token(token)
+            print(
+                f"[SANNA] Approval token for escalation "
+                f"{entry.escalation_id}: {token}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                "[SANNA] Provide this token to approve the action.",
+                file=sys.stderr,
+                flush=True,
+            )
+            instruction = (
+                "Approval token required. The user must provide "
+                "the approval token displayed in the gateway terminal."
+            )
+        else:
+            instruction = (
+                "This action requires user approval. Please present "
+                "the details of what you want to do and ask the user "
+                "to confirm before proceeding."
+            )
+
+        # 3. Generate escalation receipt
         escalation_result = {
             "status": "ESCALATION_REQUIRED",
             "escalation_id": entry.escalation_id,
@@ -719,11 +1248,7 @@ class SannaGateway:
             "constitution_rule": (
                 f"authority_boundaries.{decision.boundary_type}"
             ),
-            "instruction": (
-                "This action requires user approval. Please present "
-                "the details of what you want to do and ask the user "
-                "to confirm before proceeding."
-            ),
+            "instruction": instruction,
         }
         result_text = json.dumps(escalation_result, sort_keys=True)
 
@@ -743,13 +1268,14 @@ class SannaGateway:
             decision=decision,
             authority_decisions=authority_decisions,
             escalation_id=entry.escalation_id,
+            server_name=server_name,
         )
 
         entry.escalation_receipt_id = receipt["receipt_id"]
         self._last_receipt = receipt
         self._persist_receipt(receipt)
 
-        # 3. Return structured escalation result
+        # 4. Return structured escalation result
         return types.CallToolResult(
             content=[types.TextContent(
                 type="text", text=result_text,
@@ -761,6 +1287,7 @@ class SannaGateway:
     ) -> types.CallToolResult:
         """Handle sanna_approve_escalation meta-tool call."""
         escalation_id = arguments.get("escalation_id", "")
+        approval_token = arguments.get("approval_token", "")
         if not escalation_id:
             return types.CallToolResult(
                 content=[types.TextContent(
@@ -799,27 +1326,82 @@ class SannaGateway:
                 isError=True,
             )
 
-        # Remove from store (resolved)
-        self._escalation_store.remove(escalation_id)
+        # Validate approval token (after existence/expiry checks)
+        if self._require_approval_token:
+            if not approval_token:
+                return types.CallToolResult(
+                    content=[types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "MISSING_APPROVAL_TOKEN",
+                            "escalation_id": escalation_id,
+                            "detail": (
+                                "approval_token is required. Use the "
+                                "token displayed in the gateway terminal."
+                            ),
+                        }),
+                    )],
+                    isError=True,
+                )
+            provided_hash = self._hash_token(approval_token)
+            if not hmac.compare_digest(provided_hash, entry.token_hash):
+                return types.CallToolResult(
+                    content=[types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "INVALID_APPROVAL_TOKEN",
+                            "escalation_id": escalation_id,
+                            "detail": (
+                                "The provided approval token is invalid. "
+                                "Use the token displayed in the gateway "
+                                "terminal."
+                            ),
+                        }),
+                    )],
+                    isError=True,
+                )
+            approval_method = "token_verified"
+            token_hash_for_receipt = entry.token_hash
+        else:
+            logger.warning(
+                "Approval accepted without token verification — "
+                "development mode only",
+            )
+            approval_method = "unverified"
+            token_hash_for_receipt = None
 
-        # Forward original request to downstream
-        if self._downstream is None:
+        # Mark as approved (keep in store until execution completes)
+        self._escalation_store.mark_status(escalation_id, "approved")
+
+        # Look up correct downstream for this escalation
+        ds_state = self._downstream_states.get(entry.server_name)
+        if ds_state is None or ds_state.connection is None:
+            self._escalation_store.mark_status(escalation_id, "failed")
             return types.CallToolResult(
                 content=[types.TextContent(
                     type="text",
-                    text="Gateway not connected to downstream server",
+                    text=(
+                        f"Gateway not connected to downstream server "
+                        f"'{entry.server_name}'"
+                    ),
                 )],
                 isError=True,
             )
 
-        tool_result = await self._downstream.call_tool(
-            entry.original_name, entry.arguments,
-        )
+        try:
+            tool_result = await ds_state.connection.call_tool(
+                entry.original_name, entry.arguments,
+            )
+        except Exception:
+            self._escalation_store.mark_status(escalation_id, "failed")
+            raise
         # Block F: crash recovery
-        await self._after_downstream_call(tool_result)
-        result_text = ""
-        if tool_result.content:
-            result_text = tool_result.content[0].text
+        await self._after_downstream_call(tool_result, ds_state)
+
+        # Execution succeeded — remove from store
+        self._escalation_store.remove(escalation_id)
+
+        result_text = _extract_result_text(tool_result)
 
         # Generate approval receipt with chain to escalation receipt
         from sanna.enforcement import AuthorityDecision
@@ -850,6 +1432,10 @@ class SannaGateway:
             escalation_id=escalation_id,
             escalation_receipt_id=entry.escalation_receipt_id,
             escalation_resolution="approved",
+            approval_method=approval_method,
+            token_hash=token_hash_for_receipt,
+            server_name=entry.server_name,
+            downstream_is_error=tool_result.isError is True,
         )
 
         self._last_receipt = receipt
@@ -945,6 +1531,7 @@ class SannaGateway:
             escalation_id=escalation_id,
             escalation_receipt_id=entry.escalation_receipt_id,
             escalation_resolution="denied",
+            server_name=entry.server_name,
         )
 
         self._last_receipt = receipt
@@ -970,6 +1557,7 @@ class SannaGateway:
         original_name: str,
         arguments: dict[str, Any],
         error_text: str,
+        server_name: str | None = None,
     ) -> dict:
         """Generate an error receipt for downstream failures.
 
@@ -1007,6 +1595,7 @@ class SannaGateway:
             decision=decision,
             authority_decisions=authority_decisions,
             halt_event=halt_event,
+            server_name=server_name,
         )
 
     # -- receipt generation --------------------------------------------------
@@ -1024,32 +1613,65 @@ class SannaGateway:
         escalation_id: str | None = None,
         escalation_receipt_id: str | None = None,
         escalation_resolution: str | None = None,
+        approval_method: str | None = None,
+        token_hash: str | None = None,
+        server_name: str | None = None,
+        downstream_is_error: bool = False,
     ) -> dict:
         """Generate and optionally sign a gateway receipt."""
         from sanna.middleware import (
-            _generate_constitution_receipt,
-            _build_trace_data,
+            generate_constitution_receipt,
+            build_trace_data,
         )
+        from sanna.hashing import hash_text, hash_obj
+
+        # Resolve server_name from tool routing if not explicit
+        if server_name is None:
+            ds_name = self._tool_to_downstream.get(prefixed_name)
+            server_name = ds_name or self._first_ds.spec.name
 
         trace_id = f"gw-{uuid.uuid4().hex[:12]}"
         context_str = json.dumps(
             arguments, sort_keys=True,
         ) if arguments else ""
 
-        trace_data = _build_trace_data(
+        trace_data = build_trace_data(
             trace_id=trace_id,
             query=original_name,
             context=context_str,
             output=result_text,
         )
 
+        # Compute fidelity hashes for auditing
+        # hash_obj() uses RFC 8785 canonical JSON which rejects floats.
+        # MCP tool arguments commonly contain floats, so fall back to
+        # json.dumps for those cases.
+        arguments_hash_method = "jcs"
+        if arguments:
+            try:
+                arguments_hash = hash_obj(arguments)
+            except TypeError:
+                arguments_hash = hashlib.sha256(
+                    json.dumps(
+                        arguments, sort_keys=True, separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()[:16]
+                arguments_hash_method = "json_dumps_fallback"
+        else:
+            arguments_hash = hash_text("")
+        tool_output_hash = hash_text(result_text) if result_text else hash_text("")
+
         extensions: dict[str, Any] = {
             "gateway": {
-                "server_name": self._server_name,
+                "server_name": server_name,
                 "tool_name": original_name,
                 "prefixed_name": prefixed_name,
                 "decision": decision.decision,
                 "boundary_type": decision.boundary_type,
+                "arguments_hash": arguments_hash,
+                "arguments_hash_method": arguments_hash_method,
+                "tool_output_hash": tool_output_hash,
+                "downstream_is_error": downstream_is_error,
             },
         }
 
@@ -1064,8 +1686,12 @@ class SannaGateway:
             extensions["gateway"]["escalation_resolution"] = (
                 escalation_resolution
             )
+        if approval_method is not None:
+            extensions["gateway"]["approval_method"] = approval_method
+        if token_hash is not None:
+            extensions["gateway"]["token_hash"] = token_hash
 
-        receipt = _generate_constitution_receipt(
+        receipt = generate_constitution_receipt(
             trace_data,
             check_configs=self._check_configs or [],
             custom_records=self._custom_records or [],
@@ -1097,8 +1723,10 @@ def _build_meta_tools() -> list[types.Tool]:
         types.Tool(
             name=_META_TOOL_APPROVE,
             description=(
-                "Approve a pending escalation. Forwards the original "
-                "tool call to the downstream server."
+                "Approve a pending escalation. Requires the HMAC "
+                "approval token displayed in the gateway terminal. "
+                "Forwards the original tool call to the downstream "
+                "server."
             ),
             inputSchema={
                 "type": "object",
@@ -1110,8 +1738,16 @@ def _build_meta_tools() -> list[types.Tool]:
                             "ESCALATION_REQUIRED response."
                         ),
                     },
+                    "approval_token": {
+                        "type": "string",
+                        "description": (
+                            "The HMAC approval token displayed in "
+                            "the gateway terminal. Required for "
+                            "human-bound approval verification."
+                        ),
+                    },
                 },
-                "required": ["escalation_id"],
+                "required": ["escalation_id", "approval_token"],
             },
         ),
         types.Tool(
@@ -1176,6 +1812,10 @@ def run_gateway() -> None:
     Uses :func:`sanna.gateway.config.load_gateway_config` for validated
     config parsing with env var interpolation, path expansion, and
     fail-fast validation.
+
+    Wires ALL downstreams from the config — each gets its own
+    ``DownstreamSpec`` with independent policy overrides and
+    circuit breaker cooldown.
     """
     import argparse
     import sys
@@ -1195,6 +1835,15 @@ def run_gateway() -> None:
         required=True,
         help="Path to gateway YAML config file",
     )
+    parser.add_argument(
+        "--no-approval-token",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable HMAC approval token verification for "
+            "must_escalate approvals. Development/testing only."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -1203,22 +1852,40 @@ def run_gateway() -> None:
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # First downstream server (multi-server is Block D foundation)
-    ds = config.downstreams[0]
-    policy_overrides = build_policy_overrides(ds)
+    require_approval_token = not args.no_approval_token
+    if not require_approval_token:
+        print(
+            "[SANNA] WARNING: Approval token verification disabled "
+            "(--no-approval-token). Development mode only.",
+            file=sys.stderr,
+        )
+
+    # Build DownstreamSpec for ALL configured downstreams
+    downstream_specs: list[DownstreamSpec] = []
+    for ds in config.downstreams:
+        policy_overrides = build_policy_overrides(ds)
+        downstream_specs.append(DownstreamSpec(
+            name=ds.name,
+            command=ds.command,
+            args=ds.args,
+            env=ds.env,
+            timeout=ds.timeout,
+            policy_overrides=policy_overrides,
+            default_policy=ds.default_policy,
+            circuit_breaker_cooldown=config.circuit_breaker_cooldown,
+        ))
 
     gateway = SannaGateway(
-        server_name=ds.name,
-        command=ds.command,
-        args=ds.args,
-        env=ds.env,
-        timeout=ds.timeout,
+        downstreams=downstream_specs,
         constitution_path=config.constitution_path,
         signing_key_path=config.signing_key_path,
-        policy_overrides=policy_overrides,
-        default_policy=ds.default_policy,
+        constitution_public_key_path=(
+            config.constitution_public_key_path or None
+        ),
         escalation_timeout=config.escalation_timeout,
+        max_pending_escalations=config.max_pending_escalations,
         receipt_store_path=config.receipt_store or None,
+        require_approval_token=require_approval_token,
     )
 
     import asyncio

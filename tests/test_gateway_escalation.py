@@ -16,6 +16,7 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 from sanna.gateway.server import (
     SannaGateway,
     EscalationStore,
+    PendingEscalation,
     _META_TOOL_APPROVE,
     _META_TOOL_DENY,
 )
@@ -58,6 +59,17 @@ MOCK_SERVER_SCRIPT = textwrap.dedent("""\
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+def _get_approval_token(gw, escalation_id: str) -> str:
+    """Compute the valid approval token for a pending escalation.
+
+    Uses the gateway's internal HMAC computation — mirrors what the
+    gateway prints to stderr during escalation creation.
+    """
+    entry = gw.escalation_store.get(escalation_id)
+    assert entry is not None, f"Escalation {escalation_id} not in store"
+    return gw._compute_approval_token(entry)
+
 
 def _create_signed_constitution(
     tmp_path,
@@ -245,11 +257,12 @@ class TestApproveEscalation:
                 )
                 esc_data = json.loads(esc_result.content[0].text)
                 esc_id = esc_data["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
 
                 # Approve it
                 approve_result = await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 assert approve_result.isError is not True
                 data = json.loads(approve_result.content[0].text)
@@ -285,11 +298,12 @@ class TestApproveEscalation:
                 esc_id = esc_data["escalation_id"]
                 esc_receipt = gw.last_receipt
                 esc_receipt_id = esc_receipt["receipt_id"]
+                token = _get_approval_token(gw, esc_id)
 
                 # Approve
                 await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 approval_receipt = gw.last_receipt
 
@@ -325,10 +339,11 @@ class TestApproveEscalation:
                 esc_data = json.loads(esc_result.content[0].text)
                 esc_id = esc_data["escalation_id"]
                 assert len(gw.escalation_store) == 1
+                token = _get_approval_token(gw, esc_id)
 
                 await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 assert len(gw.escalation_store) == 0
             finally:
@@ -618,10 +633,11 @@ class TestReceiptVerification:
                 )
                 esc_data = json.loads(esc_result.content[0].text)
                 esc_id = esc_data["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
 
                 await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 r = gw.last_receipt
                 matches, computed, expected = verify_fingerprint(r)
@@ -695,10 +711,11 @@ class TestReceiptVerification:
                 esc_data = json.loads(esc_result.content[0].text)
                 esc_id = esc_data["escalation_id"]
                 esc_receipt_id = gw.last_receipt["receipt_id"]
+                token = _get_approval_token(gw, esc_id)
 
                 await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 approval_receipt = gw.last_receipt
                 chain_ref = approval_receipt["extensions"]["gateway"][
@@ -828,11 +845,12 @@ class TestConcurrentEscalations:
 
                 assert esc_id_1 != esc_id_2
                 assert len(gw.escalation_store) == 2
+                token_1 = _get_approval_token(gw, esc_id_1)
 
                 # Approve first
                 approve_result = await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id_1},
+                    {"escalation_id": esc_id_1, "approval_token": token_1},
                 )
                 data = json.loads(approve_result.content[0].text)
                 assert data["updated"] is True
@@ -880,18 +898,19 @@ class TestDoubleResolution:
                 esc_id = json.loads(
                     esc_result.content[0].text,
                 )["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
 
                 # First approve succeeds
                 r1 = await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 assert r1.isError is not True
 
-                # Second approve → NOT_FOUND
+                # Second approve → NOT_FOUND (entry removed)
                 r2 = await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
                 assert r2.isError is True
                 data = json.loads(r2.content[0].text)
@@ -923,10 +942,11 @@ class TestDoubleResolution:
                 esc_id = json.loads(
                     esc_result.content[0].text,
                 )["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
 
                 await gw._forward_call(
                     _META_TOOL_APPROVE,
-                    {"escalation_id": esc_id},
+                    {"escalation_id": esc_id, "approval_token": token},
                 )
 
                 deny_result = await gw._forward_call(
@@ -1024,3 +1044,797 @@ class TestEscalationEdgeCases:
             assert len(gw.escalation_store) == 0
 
         asyncio.run(_test())
+
+
+# =============================================================================
+# 10. APPROVAL TOKEN VERIFICATION
+# =============================================================================
+
+class TestApprovalToken:
+    """Tests for HMAC-bound approval tokens (human-binding)."""
+
+    def test_valid_token_succeeds_with_token_verified(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Valid token succeeds, receipt shows approval_method: token_verified."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
+
+                approve_result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id, "approval_token": token},
+                )
+                assert approve_result.isError is not True
+
+                receipt = gw.last_receipt
+                gw_ext = receipt["extensions"]["gateway"]
+                assert gw_ext["approval_method"] == "token_verified"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_missing_token_rejected(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Approval without token is rejected with MISSING_APPROVAL_TOKEN."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+
+                result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id},
+                )
+                assert result.isError is True
+                data = json.loads(result.content[0].text)
+                assert data["error"] == "MISSING_APPROVAL_TOKEN"
+                assert data["escalation_id"] == esc_id
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_wrong_token_rejected(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Approval with wrong token is rejected with INVALID_APPROVAL_TOKEN."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+
+                result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {
+                        "escalation_id": esc_id,
+                        "approval_token": "wrong_token_value",
+                    },
+                )
+                assert result.isError is True
+                data = json.loads(result.content[0].text)
+                assert data["error"] == "INVALID_APPROVAL_TOKEN"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_token_from_other_escalation_rejected(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Token from escalation A cannot approve escalation B."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # Create two escalations
+                r1 = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "first"},
+                )
+                esc_id_1 = json.loads(r1.content[0].text)["escalation_id"]
+                token_1 = _get_approval_token(gw, esc_id_1)
+
+                r2 = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "2", "name": "second"},
+                )
+                esc_id_2 = json.loads(r2.content[0].text)["escalation_id"]
+
+                # Try to use token_1 to approve escalation 2
+                result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {
+                        "escalation_id": esc_id_2,
+                        "approval_token": token_1,
+                    },
+                )
+                assert result.isError is True
+                data = json.loads(result.content[0].text)
+                assert data["error"] == "INVALID_APPROVAL_TOKEN"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_token_expires_with_escalation(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Token is useless after escalation times out."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                escalation_timeout=1,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
+
+                await asyncio.sleep(1.2)
+
+                result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id, "approval_token": token},
+                )
+                assert result.isError is True
+                data = json.loads(result.content[0].text)
+                assert data["error"] == "ESCALATION_EXPIRED"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_no_token_mode_succeeds_without_token(
+        self, mock_server_path, signed_constitution,
+    ):
+        """--no-approval-token mode: approval succeeds without token,
+        receipt shows approval_method: unverified."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                require_approval_token=False,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+
+                approve_result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id},
+                )
+                assert approve_result.isError is not True
+                data = json.loads(approve_result.content[0].text)
+                assert data["updated"] is True
+
+                receipt = gw.last_receipt
+                gw_ext = receipt["extensions"]["gateway"]
+                assert gw_ext["approval_method"] == "unverified"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_stderr_contains_token_on_escalation(
+        self, mock_server_path, signed_constitution, capsys,
+    ):
+        """Token is printed to stderr on escalation creation."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+        captured = capsys.readouterr()
+        assert "[SANNA] Approval token for escalation" in captured.err
+        assert "esc_" in captured.err
+
+    def test_token_not_in_mcp_response(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Token is NOT present in the MCP response to the model."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
+
+                # The raw MCP response text must NOT contain the token
+                response_text = esc_result.content[0].text
+                assert token not in response_text
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_receipt_includes_token_hash_not_raw(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Receipt includes token_hash (SHA-256 of token), not raw token."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                esc_id = esc_data["escalation_id"]
+                token = _get_approval_token(gw, esc_id)
+
+                await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id, "approval_token": token},
+                )
+                receipt = gw.last_receipt
+                gw_ext = receipt["extensions"]["gateway"]
+
+                # token_hash is present and is a SHA-256 hex
+                assert "token_hash" in gw_ext
+                assert len(gw_ext["token_hash"]) == 64
+                # Raw token is NOT in the receipt
+                receipt_str = json.dumps(receipt)
+                assert token not in receipt_str
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_end_to_end_escalation_approve_with_token(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Full flow: escalate -> token printed -> approve with token ->
+        forwarded -> receipt with full chain."""
+        const_path, key_path, _ = signed_constitution
+        async def _test():
+            from sanna.verify import verify_fingerprint
+
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # Step 1: Trigger escalation
+                esc_result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "99", "name": "e2e-test"},
+                )
+                esc_data = json.loads(esc_result.content[0].text)
+                assert esc_data["status"] == "ESCALATION_REQUIRED"
+                esc_id = esc_data["escalation_id"]
+                esc_receipt = gw.last_receipt
+                esc_receipt_id = esc_receipt["receipt_id"]
+
+                # Escalation receipt fingerprint is valid
+                matches, _, _ = verify_fingerprint(esc_receipt)
+                assert matches
+
+                # Step 2: Get the token
+                token = _get_approval_token(gw, esc_id)
+
+                # Step 3: Approve with token
+                approve_result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id, "approval_token": token},
+                )
+                assert approve_result.isError is not True
+                data = json.loads(approve_result.content[0].text)
+                assert data["updated"] is True
+                assert data["item_id"] == "99"
+                assert data["name"] == "e2e-test"
+
+                # Step 4: Verify approval receipt
+                approval_receipt = gw.last_receipt
+                gw_ext = approval_receipt["extensions"]["gateway"]
+                assert gw_ext["escalation_id"] == esc_id
+                assert gw_ext["escalation_receipt_id"] == esc_receipt_id
+                assert gw_ext["escalation_resolution"] == "approved"
+                assert gw_ext["approval_method"] == "token_verified"
+                assert "token_hash" in gw_ext
+                assert len(gw_ext["token_hash"]) == 64
+
+                # Approval receipt fingerprint is valid
+                matches, _, _ = verify_fingerprint(approval_receipt)
+                assert matches
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# ESCALATION STORE HARDENING TESTS
+# =============================================================================
+
+
+class TestEscalationStoreHardening:
+    """Tests for escalation store hardening (v0.10.1)."""
+
+    # -- Full UUID IDs -------------------------------------------------------
+
+    def test_escalation_id_is_full_uuid(self):
+        """Escalation IDs use full uuid4.hex (32 chars), not truncated."""
+        store = EscalationStore(timeout=300)
+        entry = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="test",
+        )
+        # esc_ prefix + 32 hex chars = 36 total
+        assert entry.escalation_id.startswith("esc_")
+        hex_part = entry.escalation_id[4:]
+        assert len(hex_part) == 32
+        int(hex_part, 16)  # valid hex
+
+    def test_no_id_collisions_across_1000(self):
+        """1000 IDs are all unique (full UUID prevents collisions)."""
+        store = EscalationStore(timeout=300, max_pending=2000)
+        ids = set()
+        for _ in range(1000):
+            entry = store.create(
+                prefixed_name="srv_tool",
+                original_name="tool",
+                arguments={},
+                server_name="srv",
+                reason="test",
+            )
+            ids.add(entry.escalation_id)
+        assert len(ids) == 1000
+
+    # -- TTL purge on create() -----------------------------------------------
+
+    def test_purge_expired_cleans_old_entries(self):
+        """purge_expired() removes expired entries."""
+        store = EscalationStore(timeout=1)
+        entry = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="test",
+        )
+        # Backdate to make it expired
+        from datetime import datetime, timezone, timedelta
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=10)
+        entry.created_at = old_time.isoformat()
+
+        assert len(store) == 1
+        purged = store.purge_expired()
+        assert purged == 1
+        assert len(store) == 0
+
+    def test_create_purges_expired_first(self):
+        """create() purges expired entries before adding new one."""
+        store = EscalationStore(timeout=1, max_pending=2)
+        e1 = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="first",
+        )
+        e2 = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="second",
+        )
+        assert len(store) == 2
+
+        # Backdate both to make them expired
+        from datetime import datetime, timezone, timedelta
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=10)
+        e1.created_at = old_time.isoformat()
+        e2.created_at = old_time.isoformat()
+
+        # Creating a new one should succeed (expired ones get purged first)
+        e3 = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="third",
+        )
+        assert len(store) == 1
+        assert store.get(e3.escalation_id) is not None
+
+    # -- Max pending limit ---------------------------------------------------
+
+    def test_max_pending_default_is_100(self):
+        """Default max_pending is 100."""
+        store = EscalationStore(timeout=300)
+        assert store.max_pending == 100
+
+    def test_max_pending_configurable(self):
+        """max_pending can be set via constructor."""
+        store = EscalationStore(timeout=300, max_pending=5)
+        assert store.max_pending == 5
+
+    def test_create_raises_at_capacity(self):
+        """create() raises RuntimeError when store is at capacity."""
+        store = EscalationStore(timeout=300, max_pending=2)
+        store.create(
+            prefixed_name="srv_t1",
+            original_name="t1",
+            arguments={},
+            server_name="srv",
+            reason="first",
+        )
+        store.create(
+            prefixed_name="srv_t2",
+            original_name="t2",
+            arguments={},
+            server_name="srv",
+            reason="second",
+        )
+        with pytest.raises(RuntimeError, match="at capacity"):
+            store.create(
+                prefixed_name="srv_t3",
+                original_name="t3",
+                arguments={},
+                server_name="srv",
+                reason="third",
+            )
+
+    def test_capacity_freed_after_remove(self):
+        """After removing an entry, capacity is available again."""
+        store = EscalationStore(timeout=300, max_pending=1)
+        e1 = store.create(
+            prefixed_name="srv_t1",
+            original_name="t1",
+            arguments={},
+            server_name="srv",
+            reason="first",
+        )
+        store.remove(e1.escalation_id)
+        # Now should succeed
+        e2 = store.create(
+            prefixed_name="srv_t2",
+            original_name="t2",
+            arguments={},
+            server_name="srv",
+            reason="second",
+        )
+        assert store.get(e2.escalation_id) is not None
+
+    # -- Status field --------------------------------------------------------
+
+    def test_default_status_is_pending(self):
+        """New escalations have status 'pending'."""
+        store = EscalationStore(timeout=300)
+        entry = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="test",
+        )
+        assert entry.status == "pending"
+
+    def test_mark_status(self):
+        """mark_status() updates the status in-place."""
+        store = EscalationStore(timeout=300)
+        entry = store.create(
+            prefixed_name="srv_tool",
+            original_name="tool",
+            arguments={},
+            server_name="srv",
+            reason="test",
+        )
+        store.mark_status(entry.escalation_id, "approved")
+        assert entry.status == "approved"
+        # Still in store
+        assert store.get(entry.escalation_id) is not None
+
+    def test_mark_status_nonexistent_returns_none(self):
+        """mark_status() returns None for unknown IDs."""
+        store = EscalationStore(timeout=300)
+        result = store.mark_status("esc_nonexistent", "approved")
+        assert result is None
+
+    # -- Escalation store full error in gateway ------------------------------
+
+    def test_store_full_returns_error(self, signed_constitution, tmp_path):
+        """When store is full, escalation returns ESCALATION_STORE_FULL."""
+        mcp = pytest.importorskip("mcp")
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=["-c", MOCK_SERVER_SCRIPT],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                policy_overrides={"update_item": "must_escalate"},
+                escalation_timeout=300,
+                max_pending_escalations=1,
+                require_approval_token=False,
+            )
+            try:
+                await gw.start()
+                # First escalation should succeed
+                result1 = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "p1", "name": "first"},
+                )
+                data1 = json.loads(result1.content[0].text)
+                assert data1["status"] == "ESCALATION_REQUIRED"
+
+                # Second escalation should fail (store full)
+                result2 = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "p2", "name": "second"},
+                )
+                data2 = json.loads(result2.content[0].text)
+                assert data2["error"] == "ESCALATION_STORE_FULL"
+                assert result2.isError is True
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- Approve-then-execute ordering (the critical fix) --------------------
+
+    def test_approve_marks_approved_before_execution(
+        self, signed_constitution, tmp_path,
+    ):
+        """Approved escalation is marked 'approved' before downstream call."""
+        mcp = pytest.importorskip("mcp")
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=["-c", MOCK_SERVER_SCRIPT],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                policy_overrides={"update_item": "must_escalate"},
+                escalation_timeout=300,
+                require_approval_token=False,
+            )
+            try:
+                await gw.start()
+                result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "p1", "name": "test"},
+                )
+                data = json.loads(result.content[0].text)
+                esc_id = data["escalation_id"]
+
+                # After successful approval, entry should be removed
+                approve_result = await gw._forward_call(
+                    _META_TOOL_APPROVE,
+                    {"escalation_id": esc_id},
+                )
+                assert approve_result.isError is not True
+
+                # Entry should be gone (execution succeeded)
+                assert gw._escalation_store.get(esc_id) is None
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_approve_downstream_failure_keeps_entry_as_failed(
+        self, signed_constitution, tmp_path,
+    ):
+        """If downstream call raises, entry stays in store as 'failed'."""
+        mcp = pytest.importorskip("mcp")
+        from unittest.mock import AsyncMock
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=["-c", MOCK_SERVER_SCRIPT],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+                policy_overrides={"update_item": "must_escalate"},
+                escalation_timeout=300,
+                require_approval_token=False,
+            )
+            try:
+                await gw.start()
+                result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "p1", "name": "test"},
+                )
+                data = json.loads(result.content[0].text)
+                esc_id = data["escalation_id"]
+
+                # Monkey-patch downstream to fail
+                ds_state = gw._downstream_states["mock"]
+                original_call = ds_state.connection.call_tool
+                ds_state.connection.call_tool = AsyncMock(
+                    side_effect=Exception("downstream crashed"),
+                )
+
+                with pytest.raises(Exception, match="downstream crashed"):
+                    await gw._forward_call(
+                        _META_TOOL_APPROVE,
+                        {"escalation_id": esc_id},
+                    )
+
+                # Entry should still be in store with 'failed' status
+                entry = gw._escalation_store.get(esc_id)
+                assert entry is not None
+                assert entry.status == "failed"
+
+                # Restore original call_tool
+                ds_state.connection.call_tool = original_call
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- Config integration --------------------------------------------------
+
+    def test_max_pending_escalations_from_config(self, tmp_path):
+        """max_pending_escalations is wired from gateway config."""
+        from sanna.gateway.config import load_gateway_config
+
+        # Create minimal signed constitution and key for config loading
+        from sanna.constitution import (
+            Constitution, AgentIdentity, Provenance, Boundary,
+            sign_constitution, save_constitution,
+        )
+        from sanna.crypto import generate_keypair
+
+        keys_dir = tmp_path / "keys"
+        keys_dir.mkdir()
+        key_path, _ = generate_keypair(str(keys_dir), label="test")
+
+        const = Constitution(
+            schema_version="1.0.0",
+            identity=AgentIdentity(
+                agent_name="test",
+                domain="test",
+                description="test",
+            ),
+            provenance=Provenance(
+                authored_by="test@test.com",
+                approved_by=["test@test.com"],
+                approval_date="2026-02-15",
+                approval_method="test",
+            ),
+            boundaries=[Boundary(
+                id="B001",
+                description="test boundary",
+                category="scope",
+                severity="high",
+            )],
+        )
+        const_path = tmp_path / "constitution.yaml"
+        sign_constitution(const, str(key_path))
+        save_constitution(const, str(const_path))
+
+        config_yaml = f"""
+gateway:
+  constitution: {const_path}
+  signing_key: {key_path}
+  max_pending_escalations: 42
+
+downstream:
+  - name: test
+    command: echo
+    args: ["hello"]
+"""
+        config_file = tmp_path / "gateway.yaml"
+        config_file.write_text(config_yaml)
+
+        config = load_gateway_config(str(config_file))
+        assert config.max_pending_escalations == 42

@@ -14,7 +14,13 @@ import pytest
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
 from sanna.gateway.mcp_client import DownstreamConnectionError
-from sanna.gateway.server import SannaGateway, _dict_to_tool, _META_TOOL_NAMES
+from sanna.gateway.server import (
+    SannaGateway,
+    DownstreamSpec,
+    CircuitState,
+    _dict_to_tool,
+    _META_TOOL_NAMES,
+)
 
 # =============================================================================
 # MOCK SERVER SCRIPT (same tools as Block A tests)
@@ -486,13 +492,19 @@ class TestLifecycle:
 
         asyncio.run(_test())
 
-    def test_tool_list_empty_before_start(self):
-        """Tool list is empty before start."""
+    def test_tool_list_only_meta_tools_before_start(self):
+        """Tool list contains only meta-tools before start."""
         gw = SannaGateway(
             server_name="mock",
             command="unused",
         )
-        assert gw._build_tool_list() == []
+        tools = gw._build_tool_list()
+        tool_names = {t.name for t in tools}
+        # Only meta-tools, no downstream tools
+        assert tool_names == {
+            "sanna_approve_escalation",
+            "sanna_deny_escalation",
+        }
         assert gw.tool_map == {}
 
 
@@ -542,3 +554,573 @@ class TestEdgeCases:
         assert tool.description == "A test tool"
         assert tool.inputSchema == tool_dict["inputSchema"]
         assert isinstance(tool, types.Tool)
+
+
+# =============================================================================
+# SECOND MOCK SERVER (different tools for multi-downstream tests)
+# =============================================================================
+
+MOCK_SERVER_B_SCRIPT = textwrap.dedent("""\
+    import json
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = FastMCP("mock_downstream_b")
+
+    @mcp.tool()
+    def list_files(path: str = "/") -> str:
+        \"\"\"List files in a directory.\"\"\"
+        return json.dumps({"path": path, "files": ["a.txt", "b.txt"]})
+
+    @mcp.tool()
+    def read_file(path: str) -> str:
+        \"\"\"Read a file by path.\"\"\"
+        return json.dumps({"path": path, "content": "hello"})
+
+    @mcp.tool()
+    def write_file(path: str, content: str) -> str:
+        \"\"\"Write content to a file.\"\"\"
+        return json.dumps({"written": True, "path": path})
+
+    mcp.run(transport="stdio")
+""")
+
+
+# =============================================================================
+# 7. MULTI-DOWNSTREAM TESTS
+# =============================================================================
+
+class TestMultiDownstream:
+    """Tests for multi-downstream support: tool routing, namespacing,
+    per-downstream circuit breakers, and backward compatibility."""
+
+    @pytest.fixture()
+    def server_a_path(self, tmp_path):
+        path = tmp_path / "server_a.py"
+        path.write_text(MOCK_SERVER_SCRIPT)
+        return str(path)
+
+    @pytest.fixture()
+    def server_b_path(self, tmp_path):
+        path = tmp_path / "server_b.py"
+        path.write_text(MOCK_SERVER_B_SCRIPT)
+        return str(path)
+
+    # -- 1. Discovery from both downstreams --
+
+    def test_discovers_tools_from_both_downstreams(
+        self, server_a_path, server_b_path,
+    ):
+        """Gateway with 2 mock downstreams discovers tools from both."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                tools = gw._build_tool_list()
+                names = {t.name for t in tools if t.name not in _META_TOOL_NAMES}
+                # alpha has 4 tools, beta has 3 tools
+                assert len(names) == 7
+                # Check alpha tools
+                assert "alpha_get_status" in names
+                assert "alpha_search" in names
+                assert "alpha_create_item" in names
+                assert "alpha_error_tool" in names
+                # Check beta tools
+                assert "beta_list_files" in names
+                assert "beta_read_file" in names
+                assert "beta_write_file" in names
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 2. Tool namespacing correct --
+
+    def test_tool_namespacing_correct(
+        self, server_a_path, server_b_path,
+    ):
+        """Tool names follow {server}_{tool} pattern for both downstreams."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                for prefixed, original in gw.tool_map.items():
+                    assert (
+                        prefixed.startswith("alpha_")
+                        or prefixed.startswith("beta_")
+                    ), f"Unexpected prefix: {prefixed}"
+                    if prefixed.startswith("alpha_"):
+                        assert prefixed == f"alpha_{original}"
+                    else:
+                        assert prefixed == f"beta_{original}"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 3. Forwarding routes to correct downstream --
+
+    def test_forwarding_routes_to_correct_downstream(
+        self, server_a_path, server_b_path,
+    ):
+        """Calls are routed to the correct downstream based on prefix."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                # Call alpha tool
+                r1 = await gw._forward_call("alpha_get_status", {})
+                assert not r1.isError
+                data1 = json.loads(r1.content[0].text)
+                assert data1["status"] == "ok"
+
+                # Call beta tool
+                r2 = await gw._forward_call(
+                    "beta_list_files", {"path": "/home"},
+                )
+                assert not r2.isError
+                data2 = json.loads(r2.content[0].text)
+                assert data2["path"] == "/home"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 4. Per-server default_policy --
+
+    def test_per_server_default_policy(
+        self, server_a_path, server_b_path,
+    ):
+        """Per-server default_policy applies correctly to each downstream."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                        default_policy="can_execute",
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                        default_policy="must_escalate",
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                ds_alpha = gw.downstream_states["alpha"]
+                ds_beta = gw.downstream_states["beta"]
+                # alpha: can_execute → None (fall through)
+                assert gw._resolve_policy("get_status", ds_alpha) is None
+                # beta: must_escalate
+                assert gw._resolve_policy("list_files", ds_beta) == "must_escalate"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 5. Per-tool overrides across servers --
+
+    def test_per_tool_overrides_across_servers(
+        self, server_a_path, server_b_path,
+    ):
+        """Per-tool overrides work independently for each downstream."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                        policy_overrides={"create_item": "must_escalate"},
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                        policy_overrides={"write_file": "cannot_execute"},
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                ds_alpha = gw.downstream_states["alpha"]
+                ds_beta = gw.downstream_states["beta"]
+                # alpha: create_item is must_escalate, search falls through
+                assert gw._resolve_policy("create_item", ds_alpha) == "must_escalate"
+                assert gw._resolve_policy("search", ds_alpha) is None
+                # beta: write_file is cannot_execute, read_file falls through
+                assert gw._resolve_policy("write_file", ds_beta) == "cannot_execute"
+                assert gw._resolve_policy("read_file", ds_beta) is None
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 6. Unknown tool returns error --
+
+    def test_unknown_tool_returns_error(
+        self, server_a_path, server_b_path,
+    ):
+        """Calling an unknown tool returns an error, not a crash."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call("gamma_nonexistent", {})
+                assert result.isError
+                assert "Unknown tool" in result.content[0].text
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 7. One downstream crash doesn't affect other --
+
+    def test_one_downstream_crash_other_continues(
+        self, server_a_path, server_b_path,
+    ):
+        """When one downstream is disconnected, the other continues."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                # Close beta's connection to simulate a crash
+                ds_beta = gw._downstream_states["beta"]
+                if ds_beta.connection:
+                    await ds_beta.connection.close()
+
+                # Alpha still works
+                r = await gw._forward_call("alpha_get_status", {})
+                assert not r.isError
+                data = json.loads(r.content[0].text)
+                assert data["status"] == "ok"
+
+                # Beta call fails but doesn't crash the gateway
+                r2 = await gw._forward_call(
+                    "beta_list_files", {"path": "/"},
+                )
+                assert r2.isError
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 8. Circuit breaker is per-downstream --
+
+    def test_circuit_breaker_per_downstream(
+        self, server_a_path, server_b_path,
+    ):
+        """Circuit breaker state is independent per downstream."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                ds_alpha = gw._downstream_states["alpha"]
+                ds_beta = gw._downstream_states["beta"]
+
+                # Both start CLOSED
+                assert ds_alpha.circuit_state == CircuitState.CLOSED
+                assert ds_beta.circuit_state == CircuitState.CLOSED
+                assert gw.healthy is True
+
+                # Open beta's circuit
+                from datetime import datetime, timezone
+                ds_beta.circuit_state = CircuitState.OPEN
+                ds_beta.circuit_opened_at = datetime.now(timezone.utc)
+
+                # Alpha still healthy, gateway reports unhealthy (not all closed)
+                assert ds_alpha.circuit_state == CircuitState.CLOSED
+                assert ds_beta.circuit_state == CircuitState.OPEN
+                assert gw.healthy is False
+
+                # Alpha calls still work
+                r = await gw._forward_call("alpha_get_status", {})
+                assert not r.isError
+
+                # Beta calls are blocked
+                r2 = await gw._forward_call(
+                    "beta_list_files", {"path": "/"},
+                )
+                assert r2.isError
+                assert "unhealthy" in r2.content[0].text
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 9. Restart one downstream, tools re-discovered --
+
+    def test_restart_one_downstream_tools_rediscovered(
+        self, server_a_path, server_b_path,
+    ):
+        """Restarting one downstream only re-discovers its tools."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                # Verify initial state
+                assert "alpha_get_status" in gw.tool_map
+                assert "beta_list_files" in gw.tool_map
+
+                ds_beta = gw._downstream_states["beta"]
+                # Rebuild beta only
+                gw._rebuild_tool_map_for(ds_beta)
+
+                # Alpha tools still present
+                assert "alpha_get_status" in gw.tool_map
+                assert "alpha_search" in gw.tool_map
+                # Beta tools re-discovered
+                assert "beta_list_files" in gw.tool_map
+                assert "beta_read_file" in gw.tool_map
+                assert "beta_write_file" in gw.tool_map
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 10. Single downstream identical to v0.10.0 --
+
+    def test_single_downstream_backward_compat(self, server_a_path):
+        """Single downstream via DownstreamSpec behaves like legacy constructor."""
+        async def _test():
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="mock",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                ],
+            )
+            await gw.start()
+            try:
+                # Works like the legacy single-downstream mode
+                assert gw.server_name == "mock"
+                assert gw.downstream is not None
+                assert gw.circuit_state == CircuitState.CLOSED
+                assert gw.consecutive_failures == 0
+                assert gw.healthy is True
+
+                # Tool discovery works
+                assert "mock_get_status" in gw.tool_map
+                r = await gw._forward_call("mock_get_status", {})
+                assert not r.isError
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 11. Zero downstreams raises error --
+
+    def test_zero_downstreams_raises_error(self):
+        """Empty downstreams list raises ValueError."""
+        with pytest.raises(ValueError, match="at least one entry"):
+            SannaGateway(downstreams=[])
+
+    # -- 12. Duplicate downstream names rejected --
+
+    def test_duplicate_downstream_names_rejected(self):
+        """Duplicate downstream names raise ValueError."""
+        with pytest.raises(ValueError, match="Duplicate downstream name"):
+            SannaGateway(
+                downstreams=[
+                    DownstreamSpec(name="dup", command="unused"),
+                    DownstreamSpec(name="dup", command="unused2"),
+                ],
+            )
+
+    # -- 13. Receipts include server_name --
+
+    def test_receipts_include_server_name(
+        self, server_a_path, server_b_path, tmp_path,
+    ):
+        """Receipts include server_name identifying which downstream."""
+        async def _test():
+            # Create a minimal signed constitution
+            from sanna.constitution import (
+                Constitution,
+                AgentIdentity,
+                Provenance,
+                Boundary,
+                sign_constitution,
+                save_constitution,
+            )
+            from sanna.crypto import generate_keypair
+
+            key_dir = tmp_path / "keys"
+            priv, pub = generate_keypair(str(key_dir))
+            constitution = Constitution(
+                schema_version="0.1.0",
+                identity=AgentIdentity(
+                    agent_name="test-agent", domain="testing",
+                ),
+                provenance=Provenance(
+                    authored_by="test@example.com",
+                    approved_by=["approver@example.com"],
+                    approval_date="2024-01-01",
+                    approval_method="manual-sign-off",
+                ),
+                boundaries=[
+                    Boundary(
+                        id="B001", description="Test",
+                        category="scope", severity="high",
+                    ),
+                ],
+            )
+            signed = sign_constitution(constitution, private_key_path=priv)
+            const_path = str(tmp_path / "const.yaml")
+            save_constitution(signed, const_path)
+
+            gw = SannaGateway(
+                downstreams=[
+                    DownstreamSpec(
+                        name="alpha",
+                        command=sys.executable,
+                        args=[server_a_path],
+                    ),
+                    DownstreamSpec(
+                        name="beta",
+                        command=sys.executable,
+                        args=[server_b_path],
+                    ),
+                ],
+                constitution_path=const_path,
+                signing_key_path=priv,
+            )
+            await gw.start()
+            try:
+                # Call alpha tool — receipt should show server_name=alpha
+                await gw._forward_call("alpha_get_status", {})
+                r1 = gw.last_receipt
+                assert r1 is not None
+                assert r1["extensions"]["gateway"]["server_name"] == "alpha"
+
+                # Call beta tool — receipt should show server_name=beta
+                await gw._forward_call(
+                    "beta_list_files", {"path": "/"},
+                )
+                r2 = gw.last_receipt
+                assert r2 is not None
+                assert r2["extensions"]["gateway"]["server_name"] == "beta"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    # -- 14. downstream_states property returns copy --
+
+    def test_downstream_states_is_copy(self, server_a_path):
+        """downstream_states property returns a copy, not internal dict."""
+        gw = SannaGateway(
+            downstreams=[
+                DownstreamSpec(
+                    name="alpha",
+                    command=sys.executable,
+                    args=[server_a_path],
+                ),
+            ],
+        )
+        states = gw.downstream_states
+        states["injected"] = None
+        assert "injected" not in gw.downstream_states
+
+    # -- 15. Missing server_name and command raises error --
+
+    def test_missing_server_name_and_command_raises(self):
+        """Must provide either downstreams or server_name+command."""
+        with pytest.raises(ValueError, match="Either 'downstreams'"):
+            SannaGateway()

@@ -911,3 +911,14 @@ def sanna_observe(
     if _func is not None:
         return decorator(_func)
     return decorator
+
+
+# =============================================================================
+# PUBLIC ALIASES FOR INTERNAL HELPERS
+# =============================================================================
+# These functions were originally private (_-prefixed) but are used by
+# sanna.gateway and may be useful for third-party integrations that need
+# to generate receipts outside the @sanna_observe decorator.
+
+build_trace_data = _build_trace_data
+generate_constitution_receipt = _generate_constitution_receipt

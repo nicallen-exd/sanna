@@ -17,10 +17,15 @@ import pytest
 
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
+import mcp.types as types
+
 from sanna.gateway.mcp_client import DownstreamConnection
 from sanna.gateway.server import (
+    CircuitState,
     SannaGateway,
     _CIRCUIT_BREAKER_THRESHOLD,
+    _DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
+    _extract_result_text,
 )
 
 
@@ -48,6 +53,16 @@ MOCK_SERVER_SCRIPT = textwrap.dedent("""\
     def delete_item(item_id: str) -> str:
         \"\"\"Delete an item by ID.\"\"\"
         return json.dumps({"deleted": True, "item_id": item_id})
+
+    @mcp.tool()
+    def set_threshold(name: str, threshold: float) -> str:
+        \"\"\"Set a named threshold value.\"\"\"
+        return json.dumps({"name": name, "threshold": threshold})
+
+    @mcp.tool()
+    def configure(config: str) -> str:
+        \"\"\"Accept a JSON config string.\"\"\"
+        return json.dumps({"applied": True, "config": config})
 
     mcp.run(transport="stdio")
 """)
@@ -239,7 +254,7 @@ class TestConnectionErrorTracking:
 
 class TestCircuitBreaker:
     def test_gateway_starts_healthy(self, mock_server_path):
-        """Gateway starts in healthy state."""
+        """Gateway starts in healthy state (circuit CLOSED)."""
         async def _test():
             gw = SannaGateway(
                 server_name="mock",
@@ -249,6 +264,7 @@ class TestCircuitBreaker:
             await gw.start()
             try:
                 assert gw.healthy is True
+                assert gw.circuit_state == CircuitState.CLOSED
                 assert gw.consecutive_failures == 0
             finally:
                 await gw.shutdown()
@@ -278,6 +294,7 @@ class TestCircuitBreaker:
         self, mock_server_path, signed_constitution, receipt_store,
     ):
         """An unhealthy gateway returns error without forwarding."""
+        from datetime import datetime, timezone
         async def _test():
             const_path, private_key, _ = signed_constitution
             gw = SannaGateway(
@@ -290,8 +307,9 @@ class TestCircuitBreaker:
             )
             await gw.start()
             try:
-                # Force unhealthy
-                gw._healthy = False
+                # Force circuit OPEN (cooldown not elapsed)
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = datetime.now(timezone.utc)
                 result = await gw._forward_call("mock_get_status", {})
                 assert result.isError is True
                 assert "unhealthy" in result.content[0].text.lower()
@@ -306,6 +324,7 @@ class TestCircuitBreaker:
         self, mock_server_path, signed_constitution, receipt_store,
     ):
         """Unhealthy gateway generates an error receipt with halt event."""
+        from datetime import datetime, timezone
         async def _test():
             const_path, private_key, _ = signed_constitution
             gw = SannaGateway(
@@ -318,7 +337,8 @@ class TestCircuitBreaker:
             )
             await gw.start()
             try:
-                gw._healthy = False
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = datetime.now(timezone.utc)
                 await gw._forward_call("mock_get_status", {})
                 receipt = gw.last_receipt
                 assert receipt is not None
@@ -332,6 +352,360 @@ class TestCircuitBreaker:
     def test_circuit_breaker_threshold_constant(self):
         """Circuit breaker threshold is 3."""
         assert _CIRCUIT_BREAKER_THRESHOLD == 3
+
+    def test_default_cooldown_constant(self):
+        """Default circuit breaker cooldown is 60 seconds."""
+        assert _DEFAULT_CIRCUIT_BREAKER_COOLDOWN == 60.0
+
+
+# =============================================================================
+# 2b. HALF-OPEN CIRCUIT BREAKER
+# =============================================================================
+
+class TestHalfOpenCircuitBreaker:
+    """Tests for the half-open circuit breaker recovery pattern."""
+
+    def test_three_failures_opens_circuit(
+        self, mock_server_path, signed_constitution,
+    ):
+        """3 consecutive failures → circuit opens → calls return error."""
+        from datetime import datetime, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+            )
+            await gw.start()
+            try:
+                # Simulate 3 consecutive connection failures
+                gw._consecutive_failures = _CIRCUIT_BREAKER_THRESHOLD
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = datetime.now(timezone.utc)
+
+                assert gw.circuit_state == CircuitState.OPEN
+                assert gw.healthy is False
+
+                result = await gw._forward_call("mock_get_status", {})
+                assert result.isError is True
+                assert "circuit breaker" in result.content[0].text.lower()
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_blocked_before_cooldown_elapsed(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Before cooldown elapsed → calls still return error receipts."""
+        from datetime import datetime, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                circuit_breaker_cooldown=60.0,
+            )
+            await gw.start()
+            try:
+                # Circuit just opened — cooldown NOT elapsed
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = datetime.now(timezone.utc)
+
+                result = await gw._forward_call("mock_get_status", {})
+                assert result.isError is True
+                # State should remain OPEN
+                assert gw.circuit_state == CircuitState.OPEN
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_probe_after_cooldown_elapsed(
+        self, mock_server_path, signed_constitution,
+    ):
+        """After cooldown elapsed → next call forwarded as probe."""
+        from datetime import datetime, timedelta, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                circuit_breaker_cooldown=1.0,  # 1s cooldown
+            )
+            await gw.start()
+            try:
+                # Circuit opened 2 seconds ago (cooldown = 1s)
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=2)
+                )
+
+                # This call should be forwarded as probe
+                result = await gw._forward_call("mock_get_status", {})
+                # Mock server is healthy, so probe succeeds
+                assert result.isError is not True
+                # Circuit should be CLOSED after successful probe
+                assert gw.circuit_state == CircuitState.CLOSED
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_probe_success_closes_circuit(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Probe succeeds → circuit closes → normal operation resumes."""
+        from datetime import datetime, timedelta, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                circuit_breaker_cooldown=0.1,
+            )
+            await gw.start()
+            try:
+                # Open circuit, set cooldown in the past
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                )
+                gw._consecutive_failures = 3
+
+                # Probe call — mock server is healthy
+                result = await gw._forward_call("mock_get_status", {})
+                assert result.isError is not True
+                assert gw.circuit_state == CircuitState.CLOSED
+                assert gw.consecutive_failures == 0
+
+                # Normal operation should resume
+                result2 = await gw._forward_call(
+                    "mock_search", {"query": "test"},
+                )
+                assert result2.isError is not True
+                assert gw.circuit_state == CircuitState.CLOSED
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_probe_failure_reopens_circuit(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Probe fails → circuit reopens → another cooldown period."""
+        from datetime import datetime, timedelta, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                circuit_breaker_cooldown=0.1,
+            )
+            await gw.start()
+            try:
+                # Open circuit with cooldown in the past
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                )
+
+                # Kill downstream to simulate failure
+                if gw._downstream is not None:
+                    await gw._downstream.close()
+
+                # Probe call — downstream is dead, should fail
+                result = await gw._forward_call("mock_get_status", {})
+                # Probe failure: circuit should reopen
+                assert gw.circuit_state == CircuitState.OPEN
+                # _circuit_opened_at should be refreshed
+                assert gw._circuit_opened_at is not None
+            finally:
+                # Already shut down
+                gw._downstream = None
+                gw._tool_map.clear()
+
+        asyncio.run(_test())
+
+    def test_half_open_blocks_concurrent_calls(
+        self, mock_server_path, signed_constitution,
+    ):
+        """During HALF_OPEN → only one probe, other calls get error."""
+        from datetime import datetime, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+            )
+            await gw.start()
+            try:
+                # Force HALF_OPEN directly
+                gw._circuit_state = CircuitState.HALF_OPEN
+
+                # This call should be blocked (probe already in flight)
+                result = await gw._forward_call("mock_get_status", {})
+                assert result.isError is True
+                assert "unhealthy" in result.content[0].text.lower()
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_counter_reset_after_probe_success(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Success after probe → failure counter reset to 0."""
+        from datetime import datetime, timedelta, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                circuit_breaker_cooldown=0.1,
+            )
+            await gw.start()
+            try:
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                )
+                gw._consecutive_failures = 5
+
+                # Probe succeeds (mock server is healthy)
+                await gw._forward_call("mock_get_status", {})
+                assert gw.consecutive_failures == 0
+                assert gw.circuit_state == CircuitState.CLOSED
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_state_transitions_logged(
+        self, mock_server_path, signed_constitution, caplog,
+    ):
+        """Circuit breaker state transitions are logged."""
+        from datetime import datetime, timedelta, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                circuit_breaker_cooldown=0.1,
+            )
+            await gw.start()
+            try:
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                )
+                with caplog.at_level(
+                    logging.INFO, logger="sanna.gateway.server",
+                ):
+                    # Probe call (cooldown elapsed, mock is healthy)
+                    await gw._forward_call("mock_get_status", {})
+
+                # Should log cooldown elapsed and recovery
+                messages = " ".join(r.message for r in caplog.records)
+                assert "probe" in messages.lower()
+                assert "recovered" in messages.lower()
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_error_receipt_documents_circuit_breaker(
+        self, mock_server_path, signed_constitution, receipt_store,
+    ):
+        """Error receipts during OPEN state document circuit breaker."""
+        from datetime import datetime, timezone
+
+        async def _test():
+            const_path, private_key, _ = signed_constitution
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=private_key,
+                receipt_store_path=receipt_store,
+            )
+            await gw.start()
+            try:
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = datetime.now(timezone.utc)
+                await gw._forward_call("mock_get_status", {})
+                receipt = gw.last_receipt
+                assert receipt is not None
+                # The halt reason should mention circuit breaker
+                reason = receipt["halt_event"]["reason"].lower()
+                assert "circuit breaker" in reason
+                assert "unhealthy" in reason
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_cooldown_is_configurable(self, mock_server_path):
+        """Circuit breaker cooldown can be set via constructor."""
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                circuit_breaker_cooldown=120.0,
+            )
+            await gw.start()
+            try:
+                assert gw._circuit_breaker_cooldown == 120.0
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_cooldown_from_config(self, tmp_path):
+        """circuit_breaker_cooldown is parsed from gateway.yaml."""
+        from sanna.gateway.config import GatewayConfig
+        cfg = GatewayConfig(circuit_breaker_cooldown=90.0)
+        assert cfg.circuit_breaker_cooldown == 90.0
+
+    def test_cooldown_default_in_config(self, tmp_path):
+        """circuit_breaker_cooldown defaults to 60s in config."""
+        from sanna.gateway.config import GatewayConfig
+        cfg = GatewayConfig()
+        assert cfg.circuit_breaker_cooldown == 60.0
 
 
 # =============================================================================
@@ -574,6 +948,7 @@ class TestStructuredLogging:
         self, mock_server_path, signed_constitution, caplog, receipt_store,
     ):
         """Circuit breaker open is logged at WARNING."""
+        from datetime import datetime, timezone
         async def _test():
             const_path, private_key, _ = signed_constitution
             gw = SannaGateway(
@@ -586,7 +961,8 @@ class TestStructuredLogging:
             )
             await gw.start()
             try:
-                gw._healthy = False
+                gw._circuit_state = CircuitState.OPEN
+                gw._circuit_opened_at = datetime.now(timezone.utc)
                 with caplog.at_level(logging.WARNING, logger="sanna.gateway.server"):
                     await gw._forward_call("mock_get_status", {})
                 assert any(
@@ -740,6 +1116,233 @@ class TestCrashRecovery:
                 assert "test error" in receipt["halt_event"]["reason"]
                 assert len(receipt["authority_decisions"]) == 1
                 assert receipt["authority_decisions"][0]["decision"] == "halt"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# ARGUMENTS HASH FLOAT FALLBACK (v0.10.2)
+# =============================================================================
+
+
+class TestArgumentsHashFloatFallback:
+    """hash_obj rejects floats (RFC 8785). Gateway must not crash."""
+
+    def test_integer_arguments_use_jcs(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Integer arguments use the canonical JCS hash method."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_search", {"query": "test", "limit": 10},
+                )
+                gw_ext = gw.last_receipt["extensions"]["gateway"]
+                assert gw_ext["arguments_hash_method"] == "jcs"
+                assert len(gw_ext["arguments_hash"]) == 16
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_float_arguments_use_fallback(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Float arguments trigger json_dumps_fallback — no crash."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_set_threshold",
+                    {"name": "accuracy", "threshold": 0.85},
+                )
+                gw_ext = gw.last_receipt["extensions"]["gateway"]
+                assert gw_ext["arguments_hash_method"] == "json_dumps_fallback"
+                assert len(gw_ext["arguments_hash"]) == 16
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_nested_float_uses_fallback(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Nested float in arguments triggers fallback."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_configure",
+                    {"config": json.dumps({"rate": 1.5, "count": 3})},
+                )
+                gw_ext = gw.last_receipt["extensions"]["gateway"]
+                # config value is a string (JSON-encoded), so no float
+                # at the top level — should use JCS
+                assert gw_ext["arguments_hash_method"] == "jcs"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_mixed_int_float_uses_fallback(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Mixed int + float arguments triggers fallback."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # search accepts int limit, but we pass float
+                await gw._forward_call(
+                    "mock_set_threshold",
+                    {"name": "score", "threshold": 0.95},
+                )
+                gw_ext = gw.last_receipt["extensions"]["gateway"]
+                assert gw_ext["arguments_hash_method"] == "json_dumps_fallback"
+                assert len(gw_ext["arguments_hash"]) == 16
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_empty_arguments_hash_present(
+        self, mock_server_path, signed_constitution,
+    ):
+        """Empty/no arguments still produce a valid arguments_hash."""
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call("mock_get_status", {})
+                gw_ext = gw.last_receipt["extensions"]["gateway"]
+                assert "arguments_hash" in gw_ext
+                assert len(gw_ext["arguments_hash"]) == 16
+                assert gw_ext["arguments_hash_method"] == "jcs"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# TOOL OUTPUT CONTENT HANDLING (v0.10.2)
+# =============================================================================
+
+
+class TestExtractResultText:
+    """_extract_result_text handles all MCP content shapes safely."""
+
+    def test_single_text_content(self):
+        """Standard single text content extracted."""
+        result = types.CallToolResult(
+            content=[types.TextContent(type="text", text="hello world")],
+        )
+        assert _extract_result_text(result) == "hello world"
+
+    def test_empty_content_list(self):
+        """Empty content list returns empty string."""
+        result = types.CallToolResult(content=[])
+        assert _extract_result_text(result) == ""
+
+    def test_multiple_text_items(self):
+        """Multiple text items joined with newlines."""
+        result = types.CallToolResult(
+            content=[
+                types.TextContent(type="text", text="line 1"),
+                types.TextContent(type="text", text="line 2"),
+                types.TextContent(type="text", text="line 3"),
+            ],
+        )
+        text = _extract_result_text(result)
+        assert text == "line 1\nline 2\nline 3"
+
+    def test_non_text_content(self):
+        """Non-text content (e.g., image) produces placeholder, no crash."""
+        image_item = types.ImageContent(
+            type="image",
+            data="aGVsbG8=",  # base64 "hello"
+            mimeType="image/png",
+        )
+        result = types.CallToolResult(content=[image_item])
+        text = _extract_result_text(result)
+        assert "[image content]" in text
+
+    def test_none_result(self):
+        """None tool result returns empty string."""
+        assert _extract_result_text(None) == ""
+
+    def test_output_hash_covers_full_text(
+        self, mock_server_path, signed_constitution,
+    ):
+        """tool_output_hash in receipt covers full extracted text."""
+        from sanna.hashing import hash_text
+        const_path, key_path, _ = signed_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                await gw._forward_call(
+                    "mock_get_status", {},
+                )
+                r = gw.last_receipt
+                gw_ext = r["extensions"]["gateway"]
+                # The output hash should correspond to the actual output
+                # (not empty, not truncated)
+                assert gw_ext["tool_output_hash"] != hash_text("")
+                assert len(gw_ext["tool_output_hash"]) == 16
             finally:
                 await gw.shutdown()
 

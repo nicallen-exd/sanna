@@ -9,9 +9,11 @@ Config shape::
     gateway:
       transport: stdio
       constitution: ./constitutions/openclaw-personal.yaml
+      constitution_public_key: ~/.sanna/keys/author.pub  # optional
       signing_key: ~/.sanna/keys/gateway.pem
       receipt_store: ./receipts/
       escalation_timeout: 300
+      circuit_breaker_cooldown: 60  # optional, seconds
 
     downstream:
       - name: notion
@@ -80,8 +82,11 @@ class GatewayConfig:
     transport: str = "stdio"
     constitution_path: str = ""
     signing_key_path: str = ""
+    constitution_public_key_path: str = ""
     receipt_store: str = ""
     escalation_timeout: float = 300.0
+    max_pending_escalations: int = 100
+    circuit_breaker_cooldown: float = 60.0
     downstreams: list[DownstreamConfig] = field(default_factory=list)
 
 
@@ -153,6 +158,19 @@ def load_gateway_config(config_path: str) -> GatewayConfig:
             f"(resolved to {signing_key_path})"
         )
 
+    # Optional constitution public key for signature verification
+    constitution_public_key_path = ""
+    cpk_raw = gw_raw.get("constitution_public_key")
+    if cpk_raw:
+        constitution_public_key_path = _resolve_path(
+            str(cpk_raw), config_dir,
+        )
+        if not Path(constitution_public_key_path).is_file():
+            raise GatewayConfigError(
+                f"Constitution public key file not found: {cpk_raw} "
+                f"(resolved to {constitution_public_key_path})"
+            )
+
     receipt_store = ""
     receipt_store_raw = gw_raw.get("receipt_store")
     if receipt_store_raw:
@@ -160,6 +178,12 @@ def load_gateway_config(config_path: str) -> GatewayConfig:
         Path(receipt_store).mkdir(parents=True, exist_ok=True)
 
     escalation_timeout = float(gw_raw.get("escalation_timeout", 300))
+    max_pending_escalations = int(
+        gw_raw.get("max_pending_escalations", 100),
+    )
+    circuit_breaker_cooldown = float(
+        gw_raw.get("circuit_breaker_cooldown", 60),
+    )
     transport = str(gw_raw.get("transport", "stdio"))
 
     # -- downstream section --
@@ -182,8 +206,11 @@ def load_gateway_config(config_path: str) -> GatewayConfig:
         transport=transport,
         constitution_path=constitution_path,
         signing_key_path=signing_key_path,
+        constitution_public_key_path=constitution_public_key_path,
         receipt_store=receipt_store,
         escalation_timeout=escalation_timeout,
+        max_pending_escalations=max_pending_escalations,
+        circuit_breaker_cooldown=circuit_breaker_cooldown,
         downstreams=downstreams,
     )
 
