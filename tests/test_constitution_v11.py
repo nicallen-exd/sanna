@@ -66,15 +66,15 @@ def _v11_reasoning_data(**overrides):
         "evaluate_before_escalation": True,
         "auto_deny_on_reasoning_failure": False,
         "checks": {
-            "glc_minimum_substance": {
+            "glc_002_minimum_substance": {
                 "enabled": True,
                 "min_length": 30,
             },
-            "glc_no_parroting": {
+            "glc_003_no_parroting": {
                 "enabled": True,
                 "blocklist": ["because you asked", "you told me to"],
             },
-            "glc_llm_coherence": {
+            "glc_005_llm_coherence": {
                 "enabled": True,
                 "enabled_for": ["must_escalate"],
                 "timeout_ms": 3000,
@@ -138,6 +138,7 @@ class TestV11FullParsing:
     def test_v11_constitution_full_reasoning(self):
         """v1.1 constitution with full reasoning config parses all fields."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )
@@ -153,20 +154,20 @@ class TestV11FullParsing:
         assert r.evaluate_before_escalation is True
         assert r.auto_deny_on_reasoning_failure is False
 
-        # Check configs
-        assert "glc_minimum_substance" in r.checks
-        ms = r.checks["glc_minimum_substance"]
+        # Check configs (stored under canonical numbered keys)
+        assert "glc_002_minimum_substance" in r.checks
+        ms = r.checks["glc_002_minimum_substance"]
         assert isinstance(ms, GLCMinimumSubstanceConfig)
         assert ms.enabled is True
         assert ms.min_length == 30
 
-        assert "glc_no_parroting" in r.checks
-        np_check = r.checks["glc_no_parroting"]
+        assert "glc_003_no_parroting" in r.checks
+        np_check = r.checks["glc_003_no_parroting"]
         assert isinstance(np_check, GLCNoParrotingConfig)
         assert np_check.blocklist == ["because you asked", "you told me to"]
 
-        assert "glc_llm_coherence" in r.checks
-        llm = r.checks["glc_llm_coherence"]
+        assert "glc_005_llm_coherence" in r.checks
+        llm = r.checks["glc_005_llm_coherence"]
         assert isinstance(llm, GLCLLMCoherenceConfig)
         assert llm.enabled_for == ["must_escalate"]
         assert llm.timeout_ms == 3000
@@ -174,15 +175,16 @@ class TestV11FullParsing:
 
     def test_v11_without_reasoning_section(self):
         """v1.1 constitution without reasoning section → reasoning=None."""
-        data = _minimal_constitution_data(version="1.1")
+        data = _minimal_constitution_data(sanna_constitution="1.1", version="1.1")
         constitution = parse_constitution(data)
         assert constitution.version == "1.1"
         assert constitution.reasoning is None
 
     def test_v11_reasoning_changes_hash(self):
         """Adding reasoning to a constitution changes the policy hash."""
-        data_no_reasoning = _minimal_constitution_data(version="1.1")
+        data_no_reasoning = _minimal_constitution_data(sanna_constitution="1.1", version="1.1")
         data_with_reasoning = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )
@@ -193,6 +195,7 @@ class TestV11FullParsing:
     def test_v11_defaults(self):
         """v1.1 reasoning with minimal config uses correct defaults."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={},
         )
@@ -215,6 +218,7 @@ class TestValidationErrors:
     def test_invalid_require_justification_for(self):
         """Validation error for invalid enforcement level in require_justification_for."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "require_justification_for": ["must_escalate", "invalid_level"],
@@ -226,6 +230,7 @@ class TestValidationErrors:
     def test_score_threshold_out_of_range(self):
         """Validation error for score_threshold > 1.0."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -241,6 +246,7 @@ class TestValidationErrors:
     def test_score_threshold_negative(self):
         """Validation error for score_threshold < 0.0."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -256,6 +262,7 @@ class TestValidationErrors:
     def test_negative_min_length(self):
         """Validation error for min_length < 0."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -271,6 +278,7 @@ class TestValidationErrors:
     def test_zero_min_length(self):
         """Validation error for min_length == 0."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -286,6 +294,7 @@ class TestValidationErrors:
     def test_invalid_on_missing_justification(self):
         """Validation error for invalid on_missing_justification value."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "on_missing_justification": "invalid",
@@ -297,6 +306,7 @@ class TestValidationErrors:
     def test_invalid_on_check_error(self):
         """Validation error for invalid on_check_error value."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "on_check_error": "crash",
@@ -308,6 +318,7 @@ class TestValidationErrors:
     def test_empty_blocklist_item(self):
         """Validation error for empty string in blocklist."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -323,6 +334,7 @@ class TestValidationErrors:
     def test_invalid_enabled_for(self):
         """Validation error for invalid enforcement level in enabled_for."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -338,6 +350,7 @@ class TestValidationErrors:
     def test_negative_timeout_ms(self):
         """Validation error for timeout_ms <= 0."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning={
                 "checks": {
@@ -353,6 +366,7 @@ class TestValidationErrors:
     def test_reasoning_not_a_dict(self):
         """Validation error when reasoning is not a dict."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning="not a dict",
         )
@@ -368,6 +382,7 @@ class TestSerializationRoundTrip:
     def test_v11_to_dict_and_back(self):
         """v1.1 constitution survives dict round-trip."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )
@@ -377,7 +392,7 @@ class TestSerializationRoundTrip:
         assert d["version"] == "1.1"
         assert "reasoning" in d
         assert d["reasoning"]["on_check_error"] == "escalate"
-        assert d["reasoning"]["checks"]["glc_minimum_substance"]["min_length"] == 30
+        assert d["reasoning"]["checks"]["glc_002_minimum_substance"]["min_length"] == 30
 
     def test_v10_to_dict_no_version_key(self):
         """v1.0 constitution dict does not include 'version' key."""
@@ -390,6 +405,7 @@ class TestSerializationRoundTrip:
     def test_v11_yaml_round_trip(self, tmp_path):
         """v1.1 constitution survives save→load YAML round-trip."""
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )
@@ -404,10 +420,10 @@ class TestSerializationRoundTrip:
         assert loaded.reasoning is not None
         assert loaded.reasoning.on_check_error == "escalate"
         assert isinstance(
-            loaded.reasoning.checks["glc_minimum_substance"],
+            loaded.reasoning.checks["glc_002_minimum_substance"],
             GLCMinimumSubstanceConfig,
         )
-        assert loaded.reasoning.checks["glc_minimum_substance"].min_length == 30
+        assert loaded.reasoning.checks["glc_002_minimum_substance"].min_length == 30
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +437,7 @@ class TestV11Signing:
         private_key_path, public_key_path = generate_keypair(str(keys_dir))
 
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )
@@ -445,6 +462,7 @@ class TestV11Signing:
         private_key_path, _ = generate_keypair(str(keys_dir))
 
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )
@@ -479,6 +497,7 @@ class TestV11Signing:
         private_key_path, public_key_path = generate_keypair(str(keys_dir))
 
         data = _minimal_constitution_data(
+            sanna_constitution="1.1",
             version="1.1",
             reasoning=_v11_reasoning_data(),
         )

@@ -59,9 +59,15 @@ class LLMCoherenceCheck(Check):
         passed = score >= self.score_threshold
 
         details = None
+        if not passed:
+            # Convert to basis points for signing compatibility (RFC 8785
+            # canonical JSON rejects floats; use rounding not truncation)
+            details = {
+                "score_bp": int(round(score * 10000)),
+                "threshold_bp": int(round(self.score_threshold * 10000)),
+            }
+        # Preserve error details on degraded LLM responses
         if error_details:
-            details = error_details
-        elif not passed:
-            details = {"score": score, "threshold": self.score_threshold}
+            details = error_details if details is None else {**details, **error_details}
 
         return passed, score, details

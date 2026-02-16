@@ -199,6 +199,7 @@ When a tool call requires escalation (`must_escalate`), the human approver sees 
 - **v1.0 receipts** continue to verify normally
 - **Gateway without reasoning config** operates exactly as v0.10.x
 - The `reasoning:` section is optional in v1.1 constitutions
+- **Important:** Set `sanna_constitution: "1.1"` (not `version:`) to enable reasoning evaluation. The `sanna_constitution` field is the schema format identifier that gates reasoning parsing. A `reasoning:` section without `sanna_constitution: "1.1"` will be silently ignored.
 
 ## Migration from v0.10.x
 

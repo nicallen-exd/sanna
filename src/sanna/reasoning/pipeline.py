@@ -10,6 +10,7 @@ All check execution is async — the gateway runs in an event loop.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import asdict
 
 from sanna.constitution import Constitution
@@ -42,19 +43,19 @@ class ReasoningPipeline:
         self.checks.append(JustificationPresenceCheck())
 
         # glc_002 (minimum substance)
-        if self._is_check_enabled("glc_minimum_substance"):
-            config = self._check_config_dict("glc_minimum_substance")
+        if self._is_check_enabled("glc_002_minimum_substance"):
+            config = self._check_config_dict("glc_002_minimum_substance")
             self.checks.append(MinimumSubstanceCheck(config))
 
         # glc_003 (no parroting)
-        if self._is_check_enabled("glc_no_parroting"):
-            config = self._check_config_dict("glc_no_parroting")
+        if self._is_check_enabled("glc_003_no_parroting"):
+            config = self._check_config_dict("glc_003_no_parroting")
             self.checks.append(NoParrotingCheck(config))
 
         # glc_005 (LLM coherence) — stored separately, runs conditionally
         self.llm_check = None
-        if self._is_check_enabled("glc_llm_coherence"):
-            config = self._check_config_dict("glc_llm_coherence")
+        if self._is_check_enabled("glc_005_llm_coherence"):
+            config = self._check_config_dict("glc_005_llm_coherence")
             try:
                 self.llm_check = LLMCoherenceCheck(config)
             except (ValueError, ImportError) as e:
@@ -114,6 +115,10 @@ class ReasoningPipeline:
 
         justification = args.get("_justification", "")
 
+        # Type safety: non-string justification is treated as missing
+        if not isinstance(justification, str):
+            justification = ""
+
         # Check if justification is required for this enforcement level
         require_for = self.reasoning_config.require_justification_for
         if enforcement_level in require_for and not justification:
@@ -140,7 +145,27 @@ class ReasoningPipeline:
         context = {"tool_name": tool_name, "args": args}
 
         for check in self.checks:
-            result = await check.execute(justification, context)
+            start_ms = time.perf_counter() * 1000
+
+            try:
+                result = await check.execute(justification, context)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() * 1000) - start_ms)
+                logger.warning(
+                    "Check %s raised %s", check.check_id(), type(exc).__name__,
+                )
+                result = GatewayCheckResult(
+                    check_id=check.check_id(),
+                    method=check.method(),
+                    passed=False,
+                    score=0.0,
+                    latency_ms=latency_ms,
+                    details={
+                        "error": "check_exception",
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+
             check_results.append(result)
 
             # Early termination on failure when on_check_error == "block"
@@ -157,7 +182,29 @@ class ReasoningPipeline:
         # Only runs when all deterministic checks passed
         if self.llm_check and self._should_run_llm(enforcement_level):
             if all(r.passed for r in check_results):
-                llm_result = await self.llm_check.execute(justification, context)
+                start_ms = time.perf_counter() * 1000
+                try:
+                    llm_result = await self.llm_check.execute(
+                        justification, context,
+                    )
+                except Exception as exc:
+                    latency_ms = int(
+                        (time.perf_counter() * 1000) - start_ms,
+                    )
+                    logger.warning(
+                        "LLM check raised %s", type(exc).__name__,
+                    )
+                    llm_result = GatewayCheckResult(
+                        check_id=self.llm_check.check_id(),
+                        method=self.llm_check.method(),
+                        passed=False,
+                        score=0.0,
+                        latency_ms=latency_ms,
+                        details={
+                            "error": "check_exception",
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
                 check_results.append(llm_result)
 
         # Determine assurance level
@@ -178,7 +225,7 @@ class ReasoningPipeline:
         if not self.llm_check:
             return False
 
-        config = self.reasoning_config.checks.get("glc_llm_coherence")
+        config = self.reasoning_config.checks.get("glc_005_llm_coherence")
         if config is None:
             return False
 

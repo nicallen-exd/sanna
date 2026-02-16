@@ -1,4 +1,4 @@
-"""Sanna gateway — MCP enforcement proxy (v0.10.2)."""
+"""Sanna gateway — MCP enforcement proxy (v0.11.1)."""
 
 
 def main() -> None:

@@ -1197,22 +1197,111 @@ class SannaGateway:
         # 3. Block G: Run reasoning evaluation if configured
         reasoning_evaluation = None
         if self._reasoning_evaluator:
-            reasoning_evaluation = await self._reasoning_evaluator.evaluate(
-                tool_name=original_name,
-                args=arguments,
-                enforcement_level=decision.boundary_type,
+            reasoning_config = self._constitution.reasoning
+
+            # evaluate_before_escalation gating: skip eval when false
+            # and decision is escalate — eval deferred to _handle_approve()
+            skip_reasoning = (
+                reasoning_config
+                and not reasoning_config.evaluate_before_escalation
+                and decision.decision == "escalate"
             )
+
+            if not skip_reasoning:
+                try:
+                    reasoning_evaluation = (
+                        await self._reasoning_evaluator.evaluate(
+                            tool_name=original_name,
+                            args=arguments,
+                            enforcement_level=decision.boundary_type,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Reasoning evaluator error for %s", original_name,
+                    )
+                    from sanna.gateway.receipt_v2 import ReasoningEvaluation
+                    reasoning_evaluation = ReasoningEvaluation(
+                        assurance="none",
+                        checks=[],
+                        overall_score=0.0,
+                        passed=False,
+                        failure_reason="evaluator_error",
+                    )
 
             # Handle reasoning failure according to constitution config
             if reasoning_evaluation and not reasoning_evaluation.passed:
-                reasoning_config = self._constitution.reasoning
                 if reasoning_config:
-                    if reasoning_config.auto_deny_on_reasoning_failure:
+                    fr = reasoning_evaluation.failure_reason
+
+                    # A. on_missing_justification enforcement
+                    if fr == "missing_required_justification":
+                        action = reasoning_config.on_missing_justification
+                        if action == "block":
+                            decision = AuthorityDecision(
+                                decision="halt",
+                                reason=(
+                                    "Missing required justification for "
+                                    f"{original_name}"
+                                ),
+                                boundary_type=decision.boundary_type,
+                            )
+                            authority_decisions.append({
+                                "action": original_name,
+                                "decision": "halt",
+                                "reason": decision.reason,
+                                "boundary_type": decision.boundary_type,
+                                "timestamp": datetime.now(
+                                    timezone.utc,
+                                ).isoformat(),
+                            })
+                        elif action == "escalate":
+                            decision = AuthorityDecision(
+                                decision="escalate",
+                                reason=(
+                                    "Missing justification, escalating: "
+                                    f"{original_name}"
+                                ),
+                                boundary_type="must_escalate",
+                            )
+                            authority_decisions.append({
+                                "action": original_name,
+                                "decision": "escalate",
+                                "reason": decision.reason,
+                                "boundary_type": "must_escalate",
+                                "timestamp": datetime.now(
+                                    timezone.utc,
+                                ).isoformat(),
+                            })
+                        # action == "allow" → no override, pass through
+
+                    # B. auto_deny_on_reasoning_failure (takes priority)
+                    elif reasoning_config.auto_deny_on_reasoning_failure:
                         decision = AuthorityDecision(
                             decision="halt",
                             reason=(
                                 "Reasoning evaluation failed: "
-                                f"{reasoning_evaluation.failure_reason}"
+                                f"{fr}"
+                            ),
+                            boundary_type=decision.boundary_type,
+                        )
+                        authority_decisions.append({
+                            "action": original_name,
+                            "decision": "halt",
+                            "reason": decision.reason,
+                            "boundary_type": decision.boundary_type,
+                            "timestamp": datetime.now(
+                                timezone.utc,
+                            ).isoformat(),
+                        })
+
+                    # C. on_check_error enforcement
+                    elif reasoning_config.on_check_error == "block":
+                        decision = AuthorityDecision(
+                            decision="halt",
+                            reason=(
+                                "Reasoning check failed: "
+                                f"{fr}"
                             ),
                             boundary_type=decision.boundary_type,
                         )
@@ -1234,7 +1323,7 @@ class SannaGateway:
                             reason=(
                                 "Reasoning evaluation failed, "
                                 "escalating: "
-                                f"{reasoning_evaluation.failure_reason}"
+                                f"{fr}"
                             ),
                             boundary_type="must_escalate",
                         )
@@ -1247,6 +1336,7 @@ class SannaGateway:
                                 timezone.utc,
                             ).isoformat(),
                         })
+                    # on_check_error == "allow" → no override
 
         # 4. Enforce and get result
         result_text = ""
@@ -1560,6 +1650,94 @@ class SannaGateway:
         # Mark as approved (keep in store until execution completes)
         self._escalation_store.mark_status(escalation_id, "approved")
 
+        # Block G deferred: reasoning evaluation for evaluate_before_escalation: false
+        reasoning_evaluation = None
+        if self._reasoning_evaluator:
+            reasoning_config = self._constitution.reasoning
+            if reasoning_config and not reasoning_config.evaluate_before_escalation:
+                try:
+                    reasoning_evaluation = (
+                        await self._reasoning_evaluator.evaluate(
+                            tool_name=entry.original_name,
+                            args=entry.arguments,
+                            enforcement_level="must_escalate",
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Reasoning evaluator error for %s (deferred)",
+                        entry.original_name,
+                    )
+                    from sanna.gateway.receipt_v2 import ReasoningEvaluation
+                    reasoning_evaluation = ReasoningEvaluation(
+                        assurance="none",
+                        checks=[],
+                        overall_score=0.0,
+                        passed=False,
+                        failure_reason="evaluator_error",
+                    )
+
+                # If deferred reasoning fails, deny even after approval
+                if reasoning_evaluation and not reasoning_evaluation.passed:
+                    deny = False
+                    fr = reasoning_evaluation.failure_reason
+
+                    if fr == "missing_required_justification":
+                        if reasoning_config.on_missing_justification == "block":
+                            deny = True
+                    elif reasoning_config.auto_deny_on_reasoning_failure:
+                        deny = True
+                    elif reasoning_config.on_check_error == "block":
+                        deny = True
+
+                    if deny:
+                        self._escalation_store.mark_status(
+                            escalation_id, "failed",
+                        )
+                        from sanna.enforcement import AuthorityDecision as AD
+                        from sanna.receipt import HaltEvent
+
+                        deny_reason = (
+                            f"Reasoning evaluation failed after approval: "
+                            f"{fr}"
+                        )
+                        deny_decision = AD(
+                            decision="halt",
+                            reason=deny_reason,
+                            boundary_type="must_escalate",
+                        )
+                        receipt = self._generate_receipt(
+                            prefixed_name=entry.prefixed_name,
+                            original_name=entry.original_name,
+                            arguments=entry.arguments,
+                            result_text=deny_reason,
+                            decision=deny_decision,
+                            authority_decisions=[{
+                                "action": entry.original_name,
+                                "decision": "halt",
+                                "reason": deny_reason,
+                                "boundary_type": "must_escalate",
+                                "timestamp": datetime.now(
+                                    timezone.utc,
+                                ).isoformat(),
+                            }],
+                            escalation_id=escalation_id,
+                            escalation_receipt_id=entry.escalation_receipt_id,
+                            escalation_resolution="denied_by_reasoning",
+                            server_name=entry.server_name,
+                            reasoning_evaluation=reasoning_evaluation,
+                        )
+                        self._last_receipt = receipt
+                        self._persist_receipt(receipt)
+
+                        return types.CallToolResult(
+                            content=[types.TextContent(
+                                type="text",
+                                text=deny_reason,
+                            )],
+                            isError=True,
+                        )
+
         # Look up correct downstream for this escalation
         ds_state = self._downstream_states.get(entry.server_name)
         if ds_state is None or ds_state.connection is None:
@@ -1627,6 +1805,7 @@ class SannaGateway:
             approval_method=approval_method,
             token_hash=token_hash_for_receipt,
             server_name=entry.server_name,
+            reasoning_evaluation=reasoning_evaluation,
             downstream_is_error=tool_result.isError is True,
         )
 
@@ -1868,12 +2047,11 @@ class SannaGateway:
         tool_output_hash = hash_text(result_text) if result_text else hash_text("")
 
         # v2.0: Extract justification and compute Receipt Triad
+        # justification_stripped is True if _justification was present (any type)
+        justification_stripped = "_justification" in arguments
         justification = arguments.get("_justification")
-        if isinstance(justification, str):
-            justification_stripped = True
-        else:
+        if not isinstance(justification, str):
             justification = None
-            justification_stripped = False
 
         triad = compute_receipt_triad(original_name, arguments, justification)
 

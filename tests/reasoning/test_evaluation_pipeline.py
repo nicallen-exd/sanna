@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sanna.constitution import parse_constitution
+from sanna.constitution import load_constitution, parse_constitution
 from sanna.reasoning.evaluator import ReasoningEvaluator
 from sanna.reasoning.pipeline import ReasoningPipeline
 
@@ -22,7 +22,7 @@ except ImportError:
 def _make_constitution(reasoning_data=None, version="1.1"):
     """Build a minimal Constitution via parse_constitution."""
     data = {
-        "sanna_constitution": "0.1.0",
+        "sanna_constitution": version,
         "identity": {"agent_name": "test-agent", "domain": "testing"},
         "provenance": {
             "authored_by": "dev@test.com",
@@ -52,8 +52,8 @@ def _reasoning_config(**overrides):
         "on_missing_justification": "block",
         "on_check_error": "block",
         "checks": {
-            "glc_minimum_substance": {"enabled": True, "min_length": 20},
-            "glc_no_parroting": {"enabled": True},
+            "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+            "glc_003_no_parroting": {"enabled": True},
         },
     }
     config.update(overrides)
@@ -69,9 +69,9 @@ def _reasoning_with_llm(enabled_for=None):
         "on_missing_justification": "block",
         "on_check_error": "block",
         "checks": {
-            "glc_minimum_substance": {"enabled": True, "min_length": 20},
-            "glc_no_parroting": {"enabled": True},
-            "glc_llm_coherence": {
+            "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+            "glc_003_no_parroting": {"enabled": True},
+            "glc_005_llm_coherence": {
                 "enabled": True,
                 "enabled_for": enabled_for,
                 "score_threshold": 0.6,
@@ -367,3 +367,247 @@ class TestLLMIntegration:
         # Only deterministic checks (LLM skipped because not all passed)
         assert len(result.checks) == 3
         assert result.passed is False
+
+
+# ---------------------------------------------------------------------------
+# Type safety and exception handling tests
+# ---------------------------------------------------------------------------
+
+
+class TestTypeSafety:
+    @pytest.mark.asyncio
+    async def test_list_justification_treated_as_missing(self):
+        """Non-string justification (list) treated as missing."""
+        constitution = _make_constitution(_reasoning_config())
+        evaluator = ReasoningEvaluator(constitution)
+
+        result = await evaluator.evaluate(
+            tool_name="delete_db",
+            args={"id": 123, "_justification": ["not", "a", "string"]},
+            enforcement_level="must_escalate",
+        )
+
+        assert result.passed is False
+        assert result.failure_reason == "missing_required_justification"
+
+    @pytest.mark.asyncio
+    async def test_int_justification_treated_as_missing(self):
+        """Non-string justification (int) treated as missing."""
+        constitution = _make_constitution(_reasoning_config())
+        evaluator = ReasoningEvaluator(constitution)
+
+        result = await evaluator.evaluate(
+            tool_name="delete_db",
+            args={"id": 123, "_justification": 42},
+            enforcement_level="must_escalate",
+        )
+
+        assert result.passed is False
+        assert result.failure_reason == "missing_required_justification"
+
+    @pytest.mark.asyncio
+    async def test_dict_justification_treated_as_missing(self):
+        """Non-string justification (dict) treated as missing."""
+        constitution = _make_constitution(_reasoning_config())
+        evaluator = ReasoningEvaluator(constitution)
+
+        result = await evaluator.evaluate(
+            tool_name="delete_db",
+            args={"id": 123, "_justification": {"reason": "test"}},
+            enforcement_level="must_escalate",
+        )
+
+        assert result.passed is False
+        assert result.failure_reason == "missing_required_justification"
+
+    @pytest.mark.asyncio
+    async def test_non_string_justification_passes_when_not_required(self):
+        """Non-string justification passes when not required for level."""
+        constitution = _make_constitution(_reasoning_config())
+        evaluator = ReasoningEvaluator(constitution)
+
+        result = await evaluator.evaluate(
+            tool_name="read_db",
+            args={"id": 123, "_justification": [1, 2, 3]},
+            enforcement_level="can_execute",
+        )
+
+        assert result.passed is True
+        assert result.failure_reason == "justification_not_required"
+
+
+class TestCheckExceptionHandling:
+    @pytest.mark.asyncio
+    async def test_check_exception_produces_failure_result(self):
+        """Check that throws exception produces a failure GatewayCheckResult."""
+        from sanna.reasoning.pipeline import ReasoningPipeline
+
+        constitution = _make_constitution(_reasoning_config(on_check_error="allow"))
+        pipeline = ReasoningPipeline(constitution)
+
+        # Patch a check to raise
+        original_execute = pipeline.checks[1].execute
+
+        async def _raising_execute(justification, context):
+            raise ValueError("Unexpected input format")
+
+        pipeline.checks[1].execute = _raising_execute
+
+        result = await pipeline.evaluate(
+            tool_name="test",
+            args={"_justification": "A valid justification string here"},
+            enforcement_level="must_escalate",
+        )
+
+        # Pipeline should still complete (on_check_error=allow)
+        assert result.passed is False
+        assert result.assurance == "partial"
+
+        # Find the failed check
+        failed = [c for c in result.checks if not c.passed]
+        assert len(failed) >= 1
+        exc_check = [c for c in failed if c.details and c.details.get("error") == "check_exception"]
+        assert len(exc_check) == 1
+        assert exc_check[0].details["exception_type"] == "ValueError"
+        assert exc_check[0].score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_check_exception_with_block_terminates_early(self):
+        """Check exception with on_check_error=block terminates pipeline."""
+        from sanna.reasoning.pipeline import ReasoningPipeline
+
+        constitution = _make_constitution(_reasoning_config(on_check_error="block"))
+        pipeline = ReasoningPipeline(constitution)
+
+        # Patch the second check (glc_002) to raise
+        async def _raising_execute(justification, context):
+            raise RuntimeError("boom")
+
+        pipeline.checks[1].execute = _raising_execute
+
+        result = await pipeline.evaluate(
+            tool_name="test",
+            args={"_justification": "A valid justification string here"},
+            enforcement_level="must_escalate",
+        )
+
+        # Should terminate early: glc_001 (pass) + glc_002 (exception)
+        assert result.passed is False
+        assert result.assurance == "partial"
+        assert len(result.checks) == 2
+
+
+# ---------------------------------------------------------------------------
+# YAML-loaded integration tests (full parsing → pipeline)
+# ---------------------------------------------------------------------------
+
+# Minimal valid YAML constitution with reasoning enabled.
+# Uses sanna_constitution: "1.1" (NOT version:) to catch the version-gating bug.
+_YAML_CONSTITUTION = """\
+sanna_constitution: "1.1"
+
+identity:
+  agent_name: test-agent
+  domain: testing
+
+provenance:
+  authored_by: dev@test.com
+  approved_by:
+    - approver@test.com
+  approval_date: "2026-01-01"
+  approval_method: manual-sign-off
+
+boundaries:
+  - id: B001
+    description: Test boundary
+    category: scope
+    severity: high
+
+reasoning:
+  require_justification_for:
+    - must_escalate
+  on_missing_justification: block
+  on_check_error: block
+  checks:
+    glc_002_minimum_substance:
+      enabled: true
+      min_length: 20
+"""
+
+
+class TestYAMLIntegration:
+    """Type safety and exception handling through the full YAML→pipeline path."""
+
+    @pytest.mark.asyncio
+    async def test_non_string_justification_handled_gracefully(self, tmp_path):
+        """SECURITY: Non-string _justification through YAML-loaded constitution."""
+        const_path = tmp_path / "constitution.yaml"
+        const_path.write_text(_YAML_CONSTITUTION)
+
+        constitution = load_constitution(const_path)
+        evaluator = ReasoningEvaluator(constitution)
+
+        # Test with list
+        result = await evaluator.evaluate(
+            tool_name="test",
+            args={"_justification": ["not", "a", "string"]},
+            enforcement_level="must_escalate",
+        )
+        assert result.passed is False
+        assert result.assurance == "none"
+        assert result.failure_reason == "missing_required_justification"
+
+        # Test with dict
+        result = await evaluator.evaluate(
+            tool_name="test",
+            args={"_justification": {"x": 1}},
+            enforcement_level="must_escalate",
+        )
+        assert result.passed is False
+        assert result.assurance == "none"
+        assert result.failure_reason == "missing_required_justification"
+
+        # Test with int
+        result = await evaluator.evaluate(
+            tool_name="test",
+            args={"_justification": 42},
+            enforcement_level="must_escalate",
+        )
+        assert result.passed is False
+        assert result.assurance == "none"
+        assert result.failure_reason == "missing_required_justification"
+
+    @pytest.mark.asyncio
+    async def test_check_exception_creates_failure_result(self, tmp_path):
+        """ROBUSTNESS: Check exception through YAML-loaded constitution."""
+        const_path = tmp_path / "constitution.yaml"
+        const_path.write_text(_YAML_CONSTITUTION)
+
+        constitution = load_constitution(const_path)
+        evaluator = ReasoningEvaluator(constitution)
+
+        # Patch first check (glc_001) to throw
+        original = evaluator.pipeline.checks[0].execute
+
+        async def _raising_execute(justification, context):
+            raise RuntimeError("Check crashed")
+
+        evaluator.pipeline.checks[0].execute = _raising_execute
+
+        try:
+            result = await evaluator.evaluate(
+                tool_name="test",
+                args={"_justification": "A valid justification string here"},
+                enforcement_level="must_escalate",
+            )
+
+            # on_check_error=block → early termination on first failure
+            assert len(result.checks) == 1
+            assert result.checks[0].passed is False
+            assert result.checks[0].details["error"] == "check_exception"
+            assert result.checks[0].details["exception_type"] == "RuntimeError"
+            assert result.checks[0].latency_ms >= 0
+            assert result.passed is False
+            assert result.assurance == "partial"
+        finally:
+            evaluator.pipeline.checks[0].execute = original

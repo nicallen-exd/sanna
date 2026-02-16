@@ -233,6 +233,22 @@ VALID_JUSTIFICATION_LEVELS = frozenset({"must_escalate", "cannot_execute", "can_
 VALID_ON_MISSING_JUSTIFICATION = frozenset({"block", "escalate", "allow"})
 VALID_ON_CHECK_ERROR = frozenset({"block", "escalate", "allow"})
 
+# Mapping from unnumbered (legacy) check keys to canonical numbered keys.
+# Both forms are accepted in constitutions; numbered is canonical internally.
+_UNNUMBERED_TO_NUMBERED = {
+    "glc_minimum_substance": "glc_002_minimum_substance",
+    "glc_no_parroting": "glc_003_no_parroting",
+    "glc_llm_coherence": "glc_005_llm_coherence",
+}
+
+# All known check keys (numbered canonical + unnumbered legacy)
+_KNOWN_CHECK_KEYS = frozenset(_UNNUMBERED_TO_NUMBERED.keys()) | frozenset(_UNNUMBERED_TO_NUMBERED.values())
+
+
+def _normalize_check_key(key: str) -> str:
+    """Normalize a check key to its canonical numbered form."""
+    return _UNNUMBERED_TO_NUMBERED.get(key, key)
+
 
 @dataclass
 class GLCCheckConfig:
@@ -289,9 +305,10 @@ class ReasoningConfig:
             for a required level. ``"block"`` (deny), ``"escalate"``
             (route to human), or ``"allow"`` (proceed anyway).
         on_check_error: Action when a reasoning check errors.
-        checks: Named check configs. Known keys:
-            ``"glc_minimum_substance"``, ``"glc_no_parroting"``,
-            ``"glc_llm_coherence"``.
+        checks: Named check configs. Canonical (numbered) keys:
+            ``"glc_002_minimum_substance"``, ``"glc_003_no_parroting"``,
+            ``"glc_005_llm_coherence"``. Unnumbered legacy forms are
+            also accepted and normalized on parse.
         evaluate_before_escalation: If True, run reasoning checks
             before the escalation round-trip.
         auto_deny_on_reasoning_failure: If True, automatically deny
@@ -498,9 +515,11 @@ def validate_constitution_data(data: dict) -> list[str]:
                     elif not rule.get("condition"):
                         errors.append(f"authority_boundaries.must_escalate[{i}].condition is required")
 
-    # Reasoning config (optional, v1.1+)
+    # Reasoning config (optional, v1.1+) — only validate when
+    # sanna_constitution >= "1.1" (matches parse_constitution gating)
     reasoning = data.get("reasoning")
-    if reasoning is not None:
+    schema_ver = str(data.get("sanna_constitution", data.get("schema_version", CONSTITUTION_SCHEMA_VERSION)))
+    if reasoning is not None and schema_ver >= "1.1":
         if not isinstance(reasoning, dict):
             errors.append("reasoning must be a dict")
         else:
@@ -561,15 +580,21 @@ def _validate_reasoning_config(reasoning: dict) -> list[str]:
 
 
 def _validate_reasoning_check(name: str, cfg: dict) -> list[str]:
-    """Validate a single reasoning check config block."""
+    """Validate a single reasoning check config block.
+
+    Accepts both numbered (``glc_002_minimum_substance``) and unnumbered
+    (``glc_minimum_substance``) key forms.  Normalizes to numbered
+    canonical form for matching.
+    """
     errors: list[str] = []
     prefix = f"reasoning.checks.{name}"
+    canonical = _normalize_check_key(name)
 
     # enabled must be bool if present
     if "enabled" in cfg and not isinstance(cfg["enabled"], bool):
         errors.append(f"{prefix}.enabled must be a boolean")
 
-    if name == "glc_minimum_substance":
+    if canonical == "glc_002_minimum_substance":
         ml = cfg.get("min_length")
         if ml is not None:
             if not isinstance(ml, int) or isinstance(ml, bool):
@@ -577,7 +602,7 @@ def _validate_reasoning_check(name: str, cfg: dict) -> list[str]:
             elif ml <= 0:
                 errors.append(f"{prefix}.min_length must be > 0, got {ml}")
 
-    elif name == "glc_no_parroting":
+    elif canonical == "glc_003_no_parroting":
         bl = cfg.get("blocklist")
         if bl is not None:
             if not isinstance(bl, list):
@@ -589,7 +614,7 @@ def _validate_reasoning_check(name: str, cfg: dict) -> list[str]:
                             f"{prefix}.blocklist[{i}] must be a non-empty string"
                         )
 
-    elif name == "glc_llm_coherence":
+    elif canonical == "glc_005_llm_coherence":
         ef = cfg.get("enabled_for")
         if ef is not None:
             if not isinstance(ef, list):
@@ -810,9 +835,12 @@ def parse_constitution(data: dict) -> Constitution:
     version = str(data.get("version", "1.0"))
 
     # Reasoning config (optional, v1.1+)
+    # Gate on sanna_constitution (not version) — sanna_constitution is the
+    # schema format identifier that users set in YAML; version is for
+    # internal schema evolution.
     reasoning = None
     reasoning_data = data.get("reasoning")
-    if reasoning_data is not None and isinstance(reasoning_data, dict) and version >= "1.1":
+    if reasoning_data is not None and isinstance(reasoning_data, dict) and schema_version >= "1.1":
         reasoning = _parse_reasoning_config(reasoning_data)
 
     return Constitution(
@@ -833,20 +861,24 @@ def parse_constitution(data: dict) -> Constitution:
 
 
 def _parse_reasoning_check(name: str, cfg: dict) -> GLCCheckConfig:
-    """Parse a single reasoning check config dict into the appropriate dataclass."""
-    enabled = cfg.get("enabled", True)
+    """Parse a single reasoning check config dict into the appropriate dataclass.
 
-    if name == "glc_minimum_substance":
+    Accepts both numbered and unnumbered key forms via normalization.
+    """
+    enabled = cfg.get("enabled", True)
+    canonical = _normalize_check_key(name)
+
+    if canonical == "glc_002_minimum_substance":
         return GLCMinimumSubstanceConfig(
             enabled=enabled,
             min_length=cfg.get("min_length", 20),
         )
-    elif name == "glc_no_parroting":
+    elif canonical == "glc_003_no_parroting":
         return GLCNoParrotingConfig(
             enabled=enabled,
             blocklist=cfg.get("blocklist", GLCNoParrotingConfig().blocklist),
         )
-    elif name == "glc_llm_coherence":
+    elif canonical == "glc_005_llm_coherence":
         return GLCLLMCoherenceConfig(
             enabled=enabled,
             enabled_for=cfg.get("enabled_for", ["must_escalate"]),
@@ -859,13 +891,18 @@ def _parse_reasoning_check(name: str, cfg: dict) -> GLCCheckConfig:
 
 
 def _parse_reasoning_config(data: dict) -> ReasoningConfig:
-    """Parse a reasoning config dict into a ReasoningConfig dataclass."""
+    """Parse a reasoning config dict into a ReasoningConfig dataclass.
+
+    Check keys are normalized to canonical numbered form (e.g.,
+    ``glc_minimum_substance`` → ``glc_002_minimum_substance``).
+    """
     checks: dict[str, GLCCheckConfig] = {}
     checks_data = data.get("checks", {})
     if isinstance(checks_data, dict):
         for name, cfg in checks_data.items():
             if isinstance(cfg, dict):
-                checks[name] = _parse_reasoning_check(name, cfg)
+                canonical = _normalize_check_key(name)
+                checks[canonical] = _parse_reasoning_check(name, cfg)
 
     return ReasoningConfig(
         require_justification_for=data.get(
@@ -917,7 +954,8 @@ def _reasoning_check_to_dict(name: str, check: GLCCheckConfig, *, for_signing: b
     basis points (0-10000) to satisfy RFC 8785 canonical JSON constraints.
     """
     d = asdict(check)
-    if for_signing and name == "glc_llm_coherence" and isinstance(check, GLCLLMCoherenceConfig):
+    canonical = _normalize_check_key(name)
+    if for_signing and canonical == "glc_005_llm_coherence" and isinstance(check, GLCLLMCoherenceConfig):
         d["score_threshold"] = int(round(check.score_threshold * 10000))
     return d
 

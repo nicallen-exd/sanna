@@ -29,7 +29,7 @@ Or write one manually:
 
 ```yaml
 # constitution.yaml
-sanna_constitution: "1.0.0"
+sanna_constitution: "1.0"
 
 identity:
   agent_name: "my-agent"
@@ -346,7 +346,7 @@ Deterministic test vectors in `tests/vectors/` for third-party verifier implemen
 
 ## Reasoning Receipts
 
-Sanna generates **reasoning receipts** — cryptographically-signed artifacts that prove an AI agent's reasoning was evaluated against governance rules.
+Sanna generates **reasoning receipts** — cryptographically-signed artifacts that prove an AI agent's reasoning was evaluated against governance rules. Requires `sanna_constitution: "1.1"` in the constitution.
 
 ### Receipt Triad
 
@@ -355,15 +355,42 @@ Every reasoning receipt cryptographically binds three components:
 - **Reasoning Hash**: Why it decided (justification for action)
 - **Action Hash**: What it did (tool call + parameters)
 
-### Gateway Checks
+### Gateway Checks (GLC)
 
-Reasoning is evaluated through four checks:
-1. **Presence**: Justification exists and is non-empty
-2. **Substance**: Meets minimum length requirement (default 20 chars)
-3. **No Parroting**: Doesn't contain blocklist phrases like "because you asked"
-4. **LLM Coherence**: Semantic alignment between reasoning and action (0.0-1.0 score)
+Reasoning is evaluated through four governance-level checks:
 
-Configure reasoning governance in your constitution's `reasoning:` section. Model selection for LLM coherence is configured via the `SANNA_LLM_MODEL` environment variable.
+| Check | ID | Method | What it catches |
+|-------|----|--------|-----------------|
+| Presence | `glc_001` | deterministic | Justification missing or empty |
+| Substance | `glc_002` | deterministic | Justification too short (`min_length`, default 20) |
+| No Parroting | `glc_003` | deterministic | Blocklist phrases like "because you asked" |
+| LLM Coherence | `glc_005` | LLM judge | Semantic misalignment between reasoning and action |
+
+Configure in the constitution `reasoning:` section:
+
+```yaml
+sanna_constitution: "1.1"
+
+# ...identity, provenance, boundaries...
+
+reasoning:
+  require_justification_for: [must_escalate, cannot_execute]
+  on_missing_justification: block    # block | escalate | allow
+  on_check_error: block              # block | escalate | allow
+  evaluate_before_escalation: true   # false defers eval to after approval
+  checks:
+    glc_002_minimum_substance:
+      enabled: true
+      min_length: 20
+    glc_003_no_parroting:
+      enabled: true
+    glc_005_llm_coherence:
+      enabled: true
+      enabled_for: [must_escalate]
+      score_threshold: 0.6
+```
+
+Model selection for LLM coherence is configured via the `SANNA_LLM_MODEL` environment variable.
 
 See [docs/reasoning-receipts.md](docs/reasoning-receipts.md) for full details.
 
@@ -469,6 +496,7 @@ The gateway discovers all tools from downstream servers and exposes them with a 
 gateway:
   transport: stdio
   constitution: ./constitutions/openclaw-personal.yaml
+  signing_key: ~/.sanna/keys/<your-key-id>.key
   receipt_store: ./receipts/
 
 downstream:
@@ -476,7 +504,7 @@ downstream:
     command: npx
     args: ["-y", "@notionhq/notion-mcp-server"]
     env:
-      NOTION_API_KEY: "${NOTION_API_KEY}"
+      OPENAPI_MCP_HEADERS: "${OPENAPI_MCP_HEADERS}"
     timeout: 30
 ```
 
@@ -569,7 +597,7 @@ pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
 
-1488 tests. 0 failures.
+1710 tests. 0 failures.
 
 ## License
 

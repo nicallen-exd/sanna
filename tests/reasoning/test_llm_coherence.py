@@ -76,8 +76,8 @@ class TestLLMCoherenceCheck:
 
         assert result.passed is False
         assert result.score == 0.3
-        assert result.details["score"] == 0.3
-        assert result.details["threshold"] == 0.6
+        assert result.details["score_bp"] == 3000
+        assert result.details["threshold_bp"] == 6000
 
     @patch("sanna.reasoning.llm_client.httpx.AsyncClient")
     async def test_exact_threshold_passes(self, mock_client_cls):

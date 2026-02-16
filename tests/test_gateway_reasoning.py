@@ -71,7 +71,7 @@ def _create_signed_constitution_v11(
     private_key_path, public_key_path = generate_keypair(str(keys_dir))
 
     data = {
-        "sanna_constitution": "0.1.0",
+        "sanna_constitution": "1.1",
         "identity": {"agent_name": "test-agent", "domain": "testing"},
         "provenance": {
             "authored_by": "dev@test.com",
@@ -136,8 +136,8 @@ def reasoning_constitution(tmp_path):
             "on_missing_justification": "block",
             "on_check_error": "block",
             "checks": {
-                "glc_minimum_substance": {"enabled": True, "min_length": 20},
-                "glc_no_parroting": {"enabled": True},
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+                "glc_003_no_parroting": {"enabled": True},
             },
         },
     )
@@ -157,8 +157,8 @@ def auto_deny_constitution(tmp_path):
             "on_check_error": "block",
             "auto_deny_on_reasoning_failure": True,
             "checks": {
-                "glc_minimum_substance": {"enabled": True, "min_length": 20},
-                "glc_no_parroting": {"enabled": True},
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+                "glc_003_no_parroting": {"enabled": True},
             },
         },
     )
@@ -515,6 +515,452 @@ class TestNoReasoningConfig:
                 receipt = gw.last_receipt
                 gw_v2 = receipt["extensions"]["gateway_v2"]
                 assert "reasoning_evaluation" not in gw_v2
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# ON_MISSING_JUSTIFICATION ENFORCEMENT
+# =============================================================================
+
+@pytest.fixture()
+def missing_justification_block_constitution(tmp_path):
+    """Constitution where on_missing_justification='block' for must_escalate."""
+    return _create_signed_constitution_v11(
+        tmp_path,
+        authority_boundaries={
+            "cannot_execute": ["delete_item"],
+            "must_escalate": ["update"],
+            "can_execute": ["get_status", "search"],
+        },
+        reasoning_data={
+            "require_justification_for": ["must_escalate"],
+            "on_missing_justification": "block",
+            "on_check_error": "allow",
+            "checks": {
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+                "glc_003_no_parroting": {"enabled": True},
+            },
+        },
+    )
+
+
+@pytest.fixture()
+def missing_justification_escalate_constitution(tmp_path):
+    """Constitution where on_missing_justification='escalate' for can_execute."""
+    return _create_signed_constitution_v11(
+        tmp_path,
+        authority_boundaries={
+            "can_execute": ["get_status", "search"],
+        },
+        reasoning_data={
+            "require_justification_for": ["can_execute"],
+            "on_missing_justification": "escalate",
+            "on_check_error": "allow",
+            "checks": {
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+            },
+        },
+    )
+
+
+@pytest.fixture()
+def missing_justification_allow_constitution(tmp_path):
+    """Constitution where on_missing_justification='allow' for can_execute."""
+    return _create_signed_constitution_v11(
+        tmp_path,
+        authority_boundaries={
+            "can_execute": ["get_status", "search"],
+        },
+        reasoning_data={
+            "require_justification_for": ["can_execute"],
+            "on_missing_justification": "allow",
+            "on_check_error": "allow",
+            "checks": {
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+            },
+        },
+    )
+
+
+class TestOnMissingJustification:
+    def test_block_halts_on_missing_justification(
+        self, mock_server_path, missing_justification_block_constitution,
+    ):
+        """on_missing_justification='block' halts when justification is missing."""
+        const_path, key_path, _ = missing_justification_block_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # update_item matches must_escalate, no justification
+                result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                # Should be halted (not escalated) due to block
+                assert result.isError is True
+                assert "Missing required justification" in result.content[0].text
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_escalate_overrides_on_missing_justification(
+        self, mock_server_path, missing_justification_escalate_constitution,
+    ):
+        """on_missing_justification='escalate' overrides to escalation."""
+        const_path, key_path, _ = missing_justification_escalate_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # search is can_execute, no justification
+                result = await gw._forward_call(
+                    "mock_search",
+                    {"query": "test"},
+                )
+                # Should be escalated (not halted)
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["status"] == "ESCALATION_REQUIRED"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_allow_passes_on_missing_justification(
+        self, mock_server_path, missing_justification_allow_constitution,
+    ):
+        """on_missing_justification='allow' passes through without justification."""
+        const_path, key_path, _ = missing_justification_allow_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_search",
+                    {"query": "test"},
+                )
+                # Should pass through (allow)
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["query"] == "test"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# ON_CHECK_ERROR: "BLOCK" ENFORCEMENT
+# =============================================================================
+
+@pytest.fixture()
+def check_error_block_constitution(tmp_path):
+    """Constitution with on_check_error='block' for can_execute."""
+    return _create_signed_constitution_v11(
+        tmp_path,
+        authority_boundaries={
+            "can_execute": ["get_status", "search"],
+        },
+        reasoning_data={
+            "require_justification_for": ["can_execute"],
+            "on_missing_justification": "block",
+            "on_check_error": "block",
+            "checks": {
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+                "glc_003_no_parroting": {"enabled": True},
+            },
+        },
+    )
+
+
+class TestOnCheckErrorBlock:
+    def test_block_halts_on_check_failure(
+        self, mock_server_path, check_error_block_constitution,
+    ):
+        """on_check_error='block' halts when a reasoning check fails."""
+        const_path, key_path, _ = check_error_block_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # "ok" is too short for min_length=20
+                result = await gw._forward_call(
+                    "mock_search",
+                    {"query": "test", "_justification": "ok"},
+                )
+                assert result.isError is True
+                assert "Reasoning check failed" in result.content[0].text
+
+                receipt = gw.last_receipt
+                gw_v2 = receipt["extensions"]["gateway_v2"]
+                assert "reasoning_evaluation" in gw_v2
+                assert gw_v2["reasoning_evaluation"]["passed"] is False
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_block_allows_on_check_pass(
+        self, mock_server_path, check_error_block_constitution,
+    ):
+        """on_check_error='block' allows when reasoning checks pass."""
+        const_path, key_path, _ = check_error_block_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_search",
+                    {
+                        "query": "test",
+                        "_justification": "Searching for compliance data in database",
+                    },
+                )
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["query"] == "test"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# EVALUATE_BEFORE_ESCALATION
+# =============================================================================
+
+@pytest.fixture()
+def deferred_eval_constitution(tmp_path):
+    """Constitution with evaluate_before_escalation=false."""
+    return _create_signed_constitution_v11(
+        tmp_path,
+        authority_boundaries={
+            "must_escalate": ["update"],
+            "can_execute": ["get_status", "search"],
+        },
+        reasoning_data={
+            "require_justification_for": ["must_escalate"],
+            "on_missing_justification": "block",
+            "on_check_error": "block",
+            "evaluate_before_escalation": False,
+            "checks": {
+                "glc_002_minimum_substance": {"enabled": True, "min_length": 20},
+                "glc_003_no_parroting": {"enabled": True},
+            },
+        },
+    )
+
+
+class TestEvaluateBeforeEscalation:
+    def test_deferred_eval_skips_before_escalation(
+        self, mock_server_path, deferred_eval_constitution,
+    ):
+        """evaluate_before_escalation=false skips reasoning at escalation time."""
+        const_path, key_path, _ = deferred_eval_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # update_item matches must_escalate, no justification
+                # With evaluate_before_escalation=false, should NOT halt
+                # even though justification is missing — just escalate
+                result = await gw._forward_call(
+                    "mock_update_item",
+                    {"item_id": "1", "name": "new"},
+                )
+                # Should be escalated (reasoning deferred)
+                assert result.isError is not True
+                data = json.loads(result.content[0].text)
+                assert data["status"] == "ESCALATION_REQUIRED"
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_deferred_eval_still_runs_for_can_execute(
+        self, mock_server_path, deferred_eval_constitution,
+    ):
+        """evaluate_before_escalation=false only affects escalate decisions."""
+        const_path, key_path, _ = deferred_eval_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # search is can_execute, valid justification
+                result = await gw._forward_call(
+                    "mock_search",
+                    {
+                        "query": "test",
+                        "_justification": "Searching for compliance data in database",
+                    },
+                )
+                assert result.isError is not True
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# EVALUATOR ERROR SAFETY
+# =============================================================================
+
+class TestJustificationStrippedAudit:
+    def test_non_string_justification_stripped_is_true(
+        self, mock_server_path, reasoning_constitution,
+    ):
+        """justification_stripped is True when _justification is present but non-string."""
+        const_path, key_path, _ = reasoning_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # _justification is a list (non-string) — should still be stripped
+                await gw._forward_call(
+                    "mock_search",
+                    {"query": "test", "_justification": ["not", "a", "string"]},
+                )
+                receipt = gw.last_receipt
+                gw_v2 = receipt["extensions"]["gateway_v2"]
+                assert gw_v2["action"]["justification_stripped"] is True
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+    def test_list_justification_treated_as_missing_in_gateway(
+        self, mock_server_path, auto_deny_constitution,
+    ):
+        """Non-string _justification in gateway → treated as missing by pipeline."""
+        const_path, key_path, _ = auto_deny_constitution
+
+        async def _test():
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                result = await gw._forward_call(
+                    "mock_search",
+                    {"query": "test", "_justification": [1, 2, 3]},
+                )
+                # auto_deny + missing justification → halt
+                assert result.isError is True
+            finally:
+                await gw.shutdown()
+
+        asyncio.run(_test())
+
+
+# =============================================================================
+# EVALUATOR ERROR SAFETY
+# =============================================================================
+
+class TestEvaluatorErrorSafety:
+    def test_evaluator_exception_produces_safe_fallback(
+        self, mock_server_path, auto_deny_constitution,
+    ):
+        """Evaluator exception produces safe fallback ReasoningEvaluation."""
+        const_path, key_path, _ = auto_deny_constitution
+
+        async def _test():
+            from unittest.mock import AsyncMock
+
+            gw = SannaGateway(
+                server_name="mock",
+                command=sys.executable,
+                args=[mock_server_path],
+                constitution_path=const_path,
+                signing_key_path=key_path,
+            )
+            await gw.start()
+            try:
+                # Patch evaluator to raise
+                gw._reasoning_evaluator.evaluate = AsyncMock(
+                    side_effect=RuntimeError("LLM connection failed"),
+                )
+
+                result = await gw._forward_call(
+                    "mock_search",
+                    {
+                        "query": "test",
+                        "_justification": "Testing evaluator error handling",
+                    },
+                )
+                # auto_deny_on_reasoning_failure=True + evaluator error
+                # → should halt
+                assert result.isError is True
+
+                receipt = gw.last_receipt
+                gw_v2 = receipt["extensions"]["gateway_v2"]
+                assert "reasoning_evaluation" in gw_v2
+                assert gw_v2["reasoning_evaluation"]["passed"] is False
+                assert gw_v2["reasoning_evaluation"]["failure_reason"] == "evaluator_error"
             finally:
                 await gw.shutdown()
 
